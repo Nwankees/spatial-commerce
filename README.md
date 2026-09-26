@@ -43,6 +43,42 @@ The Android app adds an intentional **Analyze object** action without opening a 
 
 The Android client displays progress, structured results, and retryable errors while leaving measurement and product-preview modes intact. It uses `http://127.0.0.1:8000` for USB development; cleartext networking is enabled only for this local Milestone 3 workflow and must be replaced by HTTPS before deployment.
 
+## Milestone 4: real product retrieval
+
+After a successful analysis, a separate **Find similar products** action sends the typed `VisualProductAnalysis` to the backend (`POST /api/v1/products/search`). The backend:
+
+- builds one deterministic shopping query (`ProductQueryBuilder`: color + primary style + primary material + product type, capped for recall, falling back to Gemini's `searchKeywords`) without a second Gemini call;
+- queries SerpApi Google Shopping through a replaceable `ProductSearchProvider` (`SerpApiProductSearchProvider`); `SERPAPI_API_KEY` stays on the backend;
+- normalizes up to five real results into `ProductCandidate` (numeric price, raw price text, explicit currency only when unambiguous, retailer, provider, provider product ID, image URL, product URL, rating, review count), dropping entries without a title, numeric price, or product link and removing duplicates;
+- reports dimensions as `unavailable` because Google Shopping search results do not contain structured dimensions; they are never estimated (`status` is `complete`, `partial`, or `unavailable` for Milestone 5); and
+- caches successful live results by normalized query in `backend/.cache/` (git-ignored). If the provider later fails for the same query, the cached real results are returned with `resultSource: "cache"` and the original retrieval time; otherwise a retryable error is returned.
+
+The Android app shows the results in a scrollable panel above the lower overlay, with thumbnails (loaded with Coil), title, price, retailer, and rating. Tapping a result selects it and keeps it in app state for later milestones. The AR preview still renders only the locally authored Lighthouse chair; retrieved products are not rendered in AR.
+
+### Milestone 4 physical verification
+
+Milestone 4 was physically verified on September 26, 2026 using the Samsung Galaxy S25:
+
+- backend health reported Gemini and product search configured, and `adb reverse` was active: pass;
+- Milestone 1 measurement and reset, and Milestone 2 placement, rotation, repositioning, and reset still worked: pass;
+- Gemini analysis of a real chair returned sensible attributes and enabled **Find similar products**: pass;
+- several real purchasable products appeared, labeled live, with sensible titles, prices, and retailers: pass;
+- product thumbnails loaded for the results: pass;
+- tapping a product visibly selected it, and selection survived hiding and reopening the panel: pass;
+- a significantly different product category returned matching results: pass;
+- with the backend stopped, search failed safely with a retry that succeeded after restart: pass;
+- with live search forced to fail, a previously searched query returned clearly labeled cached results: pass;
+- the no-product path kept the search action hidden: pass; and
+- previous AR functionality still worked afterward: pass.
+
+### Deferred issues (not addressed in Milestone 4)
+
+- Cleartext HTTP is allowed app-wide for the local `adb reverse` backend; scope it or move to HTTPS before deployment.
+- The manifest requires the Depth feature although the code falls back without it.
+- `ArRenderer.setMode` reads measurement anchors from the UI thread.
+- The backend creates a Gemini client per request.
+- There are no Android unit tests.
+
 ### Milestone 3 physical verification
 
 Milestone 3 was physically verified on September 26, 2026 using the Samsung Galaxy S25:
@@ -124,6 +160,12 @@ For product preview:
 3. Use **Rotate -15°** and **Rotate +15°** to adjust its orientation.
 4. Tap another valid surface to reposition the single product instance.
 5. Select **Measure** to return to two-point measurement, or tap **Reset** to clear every anchor.
+
+For product retrieval:
+
+1. Complete a visual analysis that detects a product.
+2. Tap **Find similar products** and wait for the results panel.
+3. Scroll the results and tap one to select it; **Hide** closes the panel and **Retry search** appears after failures.
 
 For visual analysis:
 

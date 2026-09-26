@@ -14,6 +14,11 @@ class Settings(BaseSettings):
     gemini_model: str = "gemini-3.8-flash"
     gemini_timeout_seconds: float = 45.0
     max_image_bytes: int = 8_000_000
+    serpapi_api_key: str | None = None
+    serpapi_timeout_seconds: float = 15.0
+    serpapi_country: str = "us"
+    serpapi_language: str = "en"
+    product_cache_path: str = ".cache/product_search_cache.json"
 
 
 @lru_cache

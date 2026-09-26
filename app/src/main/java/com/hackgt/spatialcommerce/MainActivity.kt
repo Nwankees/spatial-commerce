@@ -34,9 +34,20 @@ class MainActivity : Activity() {
     private lateinit var measureButton: Button
     private lateinit var previewButton: Button
     private lateinit var analyzeButton: Button
+    private lateinit var findProductsButton: Button
+    private lateinit var resultsPanel: ProductResultsPanel
     private lateinit var rotationControls: LinearLayout
     private val previewProduct = PreviewProducts.lighthouseLoungeChair
     private val backendClient = GeminiBackendClient()
+    private val productSearchClient = ProductSearchClient()
+
+    // Milestone 4 state. Only touched on the UI thread.
+    private var lastAnalysis: VisualProductAnalysis? = null
+    private var analysisGeneration = 0
+    private var productSearchInFlight = false
+    private var lastProductSearch: ProductSearchResult? = null
+    /** The candidate the user picked; the handoff point for later milestones. */
+    private var selectedProduct: ProductCandidate? = null
 
     private var session: Session? = null
     private var installRequested = false
@@ -92,6 +103,16 @@ class MainActivity : Activity() {
         rotateLeftButton.setOnClickListener { renderer.rotateProduct(-15) }
         rotateRightButton.setOnClickListener { renderer.rotateProduct(15) }
         analyzeButton.setOnClickListener { beginObjectAnalysis() }
+        findProductsButton = modeButton("Find similar products").apply {
+            setPadding(dp(14), 0, dp(14), 0)
+            visibility = View.GONE
+            setOnClickListener { beginProductSearch() }
+        }
+        resultsPanel = ProductResultsPanel(
+            context = this,
+            onProductSelected = { product -> selectProduct(product) },
+            onRetry = { beginProductSearch() },
+        )
 
         rotationControls = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
@@ -113,6 +134,7 @@ class MainActivity : Activity() {
         val bottomPanel = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             setBackgroundColor(Color.argb(170, 17, 19, 24))
+            addView(resultsPanel, LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT)
             addView(infoText, LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT)
             addView(rotationControls, LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT)
             addView(controls, LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT)
@@ -127,6 +149,13 @@ class MainActivity : Activity() {
             analyzeButton,
             FrameLayout.LayoutParams(FrameLayout.LayoutParams.WRAP_CONTENT, dp(50), Gravity.TOP or Gravity.END).apply {
                 topMargin = dp(64)
+                marginEnd = dp(12)
+            },
+        )
+        root.addView(
+            findProductsButton,
+            FrameLayout.LayoutParams(FrameLayout.LayoutParams.WRAP_CONTENT, dp(50), Gravity.TOP or Gravity.END).apply {
+                topMargin = dp(122)
                 marginEnd = dp(12)
             },
         )
@@ -213,6 +242,7 @@ class MainActivity : Activity() {
     override fun onDestroy() {
         renderer.releaseAnchors()
         backendClient.close()
+        productSearchClient.close()
         session?.close()
         session = null
         super.onDestroy()
@@ -253,6 +283,12 @@ class MainActivity : Activity() {
     }
 
     private fun beginObjectAnalysis() {
+        // A new analysis supersedes the previous object; stale search results are ignored.
+        analysisGeneration += 1
+        lastAnalysis = null
+        productSearchInFlight = false
+        findProductsButton.visibility = View.GONE
+        resultsPanel.visibility = View.GONE
         analyzeButton.isEnabled = false
         analyzeButton.text = "Capturing…"
         infoText.text = "Hold steady while the current camera view is captured."
@@ -272,9 +308,15 @@ class MainActivity : Activity() {
                     onSuccess = { analysis ->
                         infoText.text = analysis.overlayText()
                         statusText.text = if (analysis.objectDetected) {
-                            "Analysis complete. Tap Analyze object to inspect the current view again."
+                            "Analysis complete. Tap Find similar products, or Analyze object to inspect again."
                         } else {
                             "No obvious product found. Center one object and retry."
+                        }
+                        if (analysis.objectDetected) {
+                            lastAnalysis = analysis
+                            findProductsButton.text = "Find similar products"
+                            findProductsButton.isEnabled = true
+                            findProductsButton.visibility = View.VISIBLE
                         }
                         analyzeButton.text = "Analyze object"
                         analyzeButton.isEnabled = true
@@ -287,6 +329,51 @@ class MainActivity : Activity() {
                 )
             }
         }
+    }
+
+    private fun beginProductSearch() {
+        val analysis = lastAnalysis ?: return
+        if (productSearchInFlight) return
+        productSearchInFlight = true
+        val generation = analysisGeneration
+        findProductsButton.isEnabled = false
+        findProductsButton.text = "Searching…"
+        resultsPanel.showLoading()
+        statusText.text = "Searching for real purchasable products…"
+
+        productSearchClient.search(analysis) { result ->
+            runOnUiThread {
+                if (generation != analysisGeneration) return@runOnUiThread
+                productSearchInFlight = false
+                findProductsButton.isEnabled = true
+                result.fold(
+                    onSuccess = { search ->
+                        lastProductSearch = search
+                        findProductsButton.text = "Find similar products"
+                        resultsPanel.showResults(search, selectedProduct?.id)
+                        statusText.text = when {
+                            search.products.isEmpty() -> "No purchasable matches found. Retry or analyze another object."
+                            search.isCached -> "Showing cached results; live search is unavailable. Tap a product to select it."
+                            else -> "Found ${search.products.size} real products. Tap one to select it."
+                        }
+                    },
+                    onFailure = { exception ->
+                        findProductsButton.text = "Retry search"
+                        val message = exception.message ?: "Product search failed. Please retry."
+                        resultsPanel.showError(message)
+                        statusText.text = "Product search did not complete."
+                    },
+                )
+            }
+        }
+    }
+
+    private fun selectProduct(product: ProductCandidate) {
+        selectedProduct = product
+        resultsPanel.markSelected(product.id)
+        val retailer = product.retailer?.let { " at $it" }.orEmpty()
+        statusText.text = "Selected: ${product.title} — ${product.displayPrice()}$retailer. " +
+            "AR preview still shows only the Lighthouse chair."
     }
 
     private fun showAnalysisError(message: String) {

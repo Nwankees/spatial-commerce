@@ -46,3 +46,6 @@ hs_err_pid*
 
 # Local task scratch files
 tmp/
+
+# Backend product-search cache (real provider results, local only)
+.cache/

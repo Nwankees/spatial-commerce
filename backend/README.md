@@ -10,7 +10,7 @@ From `backend/`:
 python -m venv .venv
 .venv\Scripts\python -m pip install -r requirements-dev.txt
 Copy-Item .env.example .env
-# Put the HackGT Gemini key in .env (never commit this file).
+# Put the HackGT Gemini key and the SerpApi key in .env (never commit this file).
 .venv\Scripts\python -m uvicorn app.main:app --host 127.0.0.1 --port 8000
 ```
 
@@ -21,6 +21,10 @@ adb reverse tcp:8000 tcp:8000
 ```
 
 The debug Android app then reaches the service at `http://127.0.0.1:8000` through the USB connection.
+
+## Product search
+
+`POST /api/v1/products/search` accepts `{"analysis": <VisualProductAnalysis>, "maxResults": 5}` and returns the query used, the provider (`serpapi`), `resultSource` (`live` or `cache`), `cachedAt`, and normalized `ProductCandidate` results from SerpApi Google Shopping. It requires `SERPAPI_API_KEY`; `/health` reports `productSearchConfigured`. Successful live results are cached in `.cache/product_search_cache.json` and are only served, clearly labeled as cached, when a later live search for the same query fails.
 
 ## Tests
 
