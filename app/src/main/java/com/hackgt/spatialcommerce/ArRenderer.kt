@@ -14,28 +14,36 @@ import com.google.ar.core.TrackingState
 import com.google.ar.core.exceptions.CameraNotAvailableException
 import java.util.Locale
 import java.util.concurrent.ConcurrentLinkedQueue
+import java.util.concurrent.atomic.AtomicInteger
 import javax.microedition.khronos.egl.EGLConfig
 import javax.microedition.khronos.opengles.GL10
 import kotlin.math.sqrt
 
 class ArRenderer(
     private val activity: MainActivity,
+    private val product: ProductPreview,
     private val tapQueue: ConcurrentLinkedQueue<TapEvent>,
     private val onStatus: (String) -> Unit,
-    private val onDistance: (String) -> Unit,
+    private val onInfo: (String) -> Unit,
 ) : GLSurfaceView.Renderer {
     private val backgroundRenderer = CameraBackgroundRenderer()
-    private val cubeRenderer = CubeRenderer()
+    private val boxRenderer = BoxRenderer()
+    private val productRenderer = ProductRenderer(boxRenderer)
     private val measurementAnchors = mutableListOf<Anchor>()
-    private var cubeAnchor: Anchor? = null
+    private var productAnchor: Anchor? = null
     private var session: Session? = null
+    @Volatile
     private var mode = InteractionMode.MEASURE
+    @Volatile
+    private var productPlaced = false
+    private val pendingRotationDegrees = AtomicInteger(0)
+    private var productRotationDegrees = 0f
     private var depthSupported = false
     private var textureBoundToSession = false
     private var viewportWidth = 1
     private var viewportHeight = 1
     private var lastStatus = ""
-    private var lastDistance = ""
+    private var lastInfo = ""
     private val viewMatrix = FloatArray(16)
     private val projectionMatrix = FloatArray(16)
 
@@ -48,19 +56,32 @@ class ArRenderer(
 
     fun setMode(newMode: InteractionMode) {
         mode = newMode
-        publishStatus(
-            if (newMode == InteractionMode.MEASURE) {
-                measurementPrompt()
-            } else {
-                "Cube mode: tap a tracked surface to place a 10 cm cube."
-            },
-        )
+        if (newMode == InteractionMode.MEASURE) {
+            publishInfo(if (measurementAnchors.size == 2) formatDistance(distanceMeters(measurementAnchors[0], measurementAnchors[1])) else "Tap two points")
+            publishStatus(measurementPrompt())
+        } else {
+            publishInfo(product.overlayText())
+            publishStatus(previewPrompt())
+        }
     }
 
     fun reset() {
         resetPending = true
-        publishDistance("Tap two points")
-        publishStatus(measurementPrompt(0))
+        if (mode == InteractionMode.MEASURE) {
+            publishInfo("Tap two points")
+            publishStatus(measurementPrompt(0))
+        } else {
+            publishInfo(product.overlayText())
+            publishStatus(previewPrompt(false))
+        }
+    }
+
+    fun rotateProduct(degrees: Int) {
+        if (!productPlaced) {
+            publishStatus("Place the ${product.name} on a tracked floor or tabletop first.")
+            return
+        }
+        pendingRotationDegrees.addAndGet(degrees)
     }
 
     @Volatile
@@ -70,7 +91,7 @@ class ArRenderer(
         GLES20.glClearColor(0f, 0f, 0f, 1f)
         GLES20.glEnable(GLES20.GL_DEPTH_TEST)
         backgroundRenderer.createOnGlThread()
-        cubeRenderer.createOnGlThread()
+        boxRenderer.createOnGlThread()
     }
 
     override fun onSurfaceChanged(gl: GL10?, width: Int, height: Int) {
@@ -112,18 +133,29 @@ class ArRenderer(
         camera.getViewMatrix(viewMatrix, 0)
         camera.getProjectionMatrix(projectionMatrix, 0, 0.1f, 100f)
 
-        measurementAnchors.forEachIndexed { index, anchor ->
-            if (anchor.trackingState == TrackingState.TRACKING) {
-                val color = if (index == 0) FIRST_MARKER_COLOR else SECOND_MARKER_COLOR
-                cubeRenderer.draw(anchor.pose, viewMatrix, projectionMatrix, 0.035f, color, liftByHalf = true)
+        if (mode == InteractionMode.MEASURE) {
+            measurementAnchors.forEachIndexed { index, anchor ->
+                if (anchor.trackingState == TrackingState.TRACKING) {
+                    val color = if (index == 0) FIRST_MARKER_COLOR else SECOND_MARKER_COLOR
+                    boxRenderer.drawCube(anchor.pose, viewMatrix, projectionMatrix, 0.035f, color, liftByHalf = true)
+                }
             }
         }
-        cubeAnchor?.takeIf { it.trackingState == TrackingState.TRACKING }?.let { anchor ->
-            cubeRenderer.draw(anchor.pose, viewMatrix, projectionMatrix, 0.10f, CUBE_COLOR, liftByHalf = true)
+        val rotationDelta = pendingRotationDegrees.getAndSet(0)
+        if (rotationDelta != 0) {
+            productRotationDegrees = (productRotationDegrees + rotationDelta) % 360f
+            publishStatus("${product.name} rotated to ${productRotationDegrees.toInt()}°. Tap another surface to reposition it.")
+        }
+        if (mode == InteractionMode.PREVIEW_PRODUCT) {
+            productAnchor?.takeIf { it.trackingState == TrackingState.TRACKING }?.let { anchor ->
+                productRenderer.draw(product, anchor.pose, productRotationDegrees, viewMatrix, projectionMatrix)
+            }
         }
 
         if (measurementAnchors.size == 2) {
-            publishDistance(formatDistance(distanceMeters(measurementAnchors[0], measurementAnchors[1])))
+            if (mode == InteractionMode.MEASURE) {
+                publishInfo(formatDistance(distanceMeters(measurementAnchors[0], measurementAnchors[1])))
+            }
         } else if (mode == InteractionMode.MEASURE) {
             publishStatus(measurementPrompt())
         }
@@ -155,16 +187,26 @@ class ArRenderer(
                 }
                 measurementAnchors += hit.createAnchor()
                 if (measurementAnchors.size == 2) {
-                    publishDistance(formatDistance(distanceMeters(measurementAnchors[0], measurementAnchors[1])))
-                    publishStatus("Measurement complete. Reset to start over, or choose Place cube.")
+                    publishInfo(formatDistance(distanceMeters(measurementAnchors[0], measurementAnchors[1])))
+                    publishStatus("Measurement complete. Reset to start over, or choose Preview product.")
                 } else {
                     publishStatus("First point placed. Tap the second physical point.")
                 }
             }
-            InteractionMode.PLACE_CUBE -> {
-                cubeAnchor?.detach()
-                cubeAnchor = hit.createAnchor()
-                publishStatus("10 cm cube placed. Tap another surface to move it.")
+            InteractionMode.PREVIEW_PRODUCT -> {
+                val productHit = frame.hitTest(tap.x, tap.y).firstOrNull { result ->
+                    val plane = result.trackable as? Plane
+                    plane?.type == Plane.Type.HORIZONTAL_UPWARD_FACING && plane.isPoseInPolygon(result.hitPose)
+                }
+                if (productHit == null) {
+                    publishStatus("Aim at a tracked floor or tabletop, move slowly, and tap again.")
+                    return
+                }
+                productAnchor?.detach()
+                productAnchor = productHit.createAnchor()
+                productPlaced = true
+                publishInfo(product.overlayText())
+                publishStatus("${product.name} placed at true scale. Rotate it or tap another surface to reposition.")
             }
         }
     }
@@ -173,8 +215,11 @@ class ArRenderer(
     private fun clearAnchors() {
         measurementAnchors.forEach(Anchor::detach)
         measurementAnchors.clear()
-        cubeAnchor?.detach()
-        cubeAnchor = null
+        productAnchor?.detach()
+        productAnchor = null
+        productPlaced = false
+        productRotationDegrees = 0f
+        pendingRotationDegrees.set(0)
         tapQueue.clear()
     }
 
@@ -202,6 +247,15 @@ class ArRenderer(
         }
     }
 
+    private fun previewPrompt(isPlaced: Boolean = productPlaced): String {
+        val depth = if (depthSupported) "Depth: ON" else "Depth: unavailable"
+        return if (isPlaced) {
+            "$depth  •  Rotate the product or tap another floor/table surface to reposition."
+        } else {
+            "$depth  •  Move slowly to find a floor or tabletop, then tap to preview."
+        }
+    }
+
     private fun publishStatus(message: String) {
         if (message != lastStatus) {
             lastStatus = message
@@ -209,16 +263,15 @@ class ArRenderer(
         }
     }
 
-    private fun publishDistance(message: String) {
-        if (message != lastDistance) {
-            lastDistance = message
-            onDistance(message)
+    private fun publishInfo(message: String) {
+        if (message != lastInfo) {
+            lastInfo = message
+            onInfo(message)
         }
     }
 
     companion object {
         private val FIRST_MARKER_COLOR = floatArrayOf(0.18f, 0.82f, 1f, 1f)
         private val SECOND_MARKER_COLOR = floatArrayOf(1f, 0.35f, 0.55f, 1f)
-        private val CUBE_COLOR = floatArrayOf(0.55f, 0.30f, 1f, 1f)
     }
 }

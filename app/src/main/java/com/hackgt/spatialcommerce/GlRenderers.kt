@@ -104,7 +104,7 @@ class CameraBackgroundRenderer {
     }
 }
 
-class CubeRenderer {
+class BoxRenderer {
     private var program = 0
     private var positionAttribute = 0
     private var normalAttribute = 0
@@ -159,7 +159,7 @@ class CubeRenderer {
         colorUniform = GLES20.glGetUniformLocation(program, "uColor")
     }
 
-    fun draw(
+    fun drawCube(
         pose: Pose,
         viewMatrix: FloatArray,
         projectionMatrix: FloatArray,
@@ -170,12 +170,21 @@ class CubeRenderer {
         pose.toMatrix(modelMatrix, 0)
         if (liftByHalf) Matrix.translateM(modelMatrix, 0, 0f, sizeMeters / 2f, 0f)
         Matrix.scaleM(modelMatrix, 0, sizeMeters, sizeMeters, sizeMeters)
-        Matrix.multiplyMM(modelViewMatrix, 0, viewMatrix, 0, modelMatrix, 0)
+        drawModel(modelMatrix, viewMatrix, projectionMatrix, color)
+    }
+
+    fun drawModel(
+        transformedModelMatrix: FloatArray,
+        viewMatrix: FloatArray,
+        projectionMatrix: FloatArray,
+        color: FloatArray,
+    ) {
+        Matrix.multiplyMM(modelViewMatrix, 0, viewMatrix, 0, transformedModelMatrix, 0)
         Matrix.multiplyMM(mvpMatrix, 0, projectionMatrix, 0, modelViewMatrix, 0)
 
         GLES20.glUseProgram(program)
         GLES20.glUniformMatrix4fv(mvpUniform, 1, false, mvpMatrix, 0)
-        GLES20.glUniformMatrix4fv(modelUniform, 1, false, modelMatrix, 0)
+        GLES20.glUniformMatrix4fv(modelUniform, 1, false, transformedModelMatrix, 0)
         GLES20.glUniform4fv(colorUniform, 1, color, 0)
 
         vertices.position(0)
@@ -214,6 +223,107 @@ class CubeRenderer {
                 gl_FragColor = vec4(uColor.rgb * brightness, uColor.a);
             }
         """
+    }
+}
+
+class ProductRenderer(private val boxRenderer: BoxRenderer) {
+    private val rootMatrix = FloatArray(16)
+    private val partMatrix = FloatArray(16)
+
+    fun draw(
+        product: ProductPreview,
+        anchorPose: Pose,
+        yawDegrees: Float,
+        viewMatrix: FloatArray,
+        projectionMatrix: FloatArray,
+    ) {
+        check(product.modelAsset == SUPPORTED_MODEL) { "Unsupported local product model: ${product.modelAsset}" }
+
+        anchorPose.toMatrix(rootMatrix, 0)
+        Matrix.rotateM(rootMatrix, 0, yawDegrees, 0f, 1f, 0f)
+
+        val width = product.widthMeters
+        val depth = product.depthMeters
+        val height = product.heightMeters
+        val seatTop = height * 0.52f
+        val seatThickness = height * 0.10f
+        val legHeight = seatTop - seatThickness
+        val legWidth = width * 0.09f
+        val legDepth = depth * 0.08f
+        val legCenterX = (width - legWidth) / 2f
+        val frontLegZ = (depth - legDepth) / 2f
+        val rearLegZ = -depth * 0.22f
+
+        drawPart(-legCenterX, legHeight / 2f, frontLegZ, legWidth, legHeight, legDepth, WOOD, viewMatrix, projectionMatrix)
+        drawPart(legCenterX, legHeight / 2f, frontLegZ, legWidth, legHeight, legDepth, WOOD, viewMatrix, projectionMatrix)
+        drawPart(-legCenterX, legHeight / 2f, rearLegZ, legWidth, legHeight, legDepth, WOOD, viewMatrix, projectionMatrix)
+        drawPart(legCenterX, legHeight / 2f, rearLegZ, legWidth, legHeight, legDepth, WOOD, viewMatrix, projectionMatrix)
+
+        drawPart(
+            x = 0f,
+            y = legHeight + seatThickness / 2f,
+            z = depth * 0.10f,
+            sizeX = width * 0.90f,
+            sizeY = seatThickness,
+            sizeZ = depth * 0.72f,
+            color = CUSHION,
+            viewMatrix = viewMatrix,
+            projectionMatrix = projectionMatrix,
+        )
+
+        val backThickness = depth * 0.10f
+        val backHeight = height - seatTop
+        drawPart(
+            x = 0f,
+            y = seatTop + backHeight / 2f,
+            z = -depth / 2f + backThickness / 2f,
+            sizeX = width * 0.90f,
+            sizeY = backHeight,
+            sizeZ = backThickness,
+            color = CUSHION_DARK,
+            viewMatrix = viewMatrix,
+            projectionMatrix = projectionMatrix,
+        )
+
+        val armWidth = width * 0.07f
+        val armHeight = height * 0.07f
+        val armCenterX = (width - armWidth) / 2f
+        val armCenterY = seatTop + height * 0.18f
+        val armDepth = depth * 0.60f
+        drawPart(-armCenterX, armCenterY, depth * 0.04f, armWidth, armHeight, armDepth, WOOD_LIGHT, viewMatrix, projectionMatrix)
+        drawPart(armCenterX, armCenterY, depth * 0.04f, armWidth, armHeight, armDepth, WOOD_LIGHT, viewMatrix, projectionMatrix)
+
+        val supportHeight = armCenterY - armHeight / 2f - seatTop
+        val supportY = seatTop + supportHeight / 2f
+        val supportDepth = depth * 0.06f
+        val supportZ = depth * 0.26f
+        drawPart(-armCenterX, supportY, supportZ, armWidth, supportHeight, supportDepth, WOOD, viewMatrix, projectionMatrix)
+        drawPart(armCenterX, supportY, supportZ, armWidth, supportHeight, supportDepth, WOOD, viewMatrix, projectionMatrix)
+    }
+
+    private fun drawPart(
+        x: Float,
+        y: Float,
+        z: Float,
+        sizeX: Float,
+        sizeY: Float,
+        sizeZ: Float,
+        color: FloatArray,
+        viewMatrix: FloatArray,
+        projectionMatrix: FloatArray,
+    ) {
+        System.arraycopy(rootMatrix, 0, partMatrix, 0, 16)
+        Matrix.translateM(partMatrix, 0, x, y, z)
+        Matrix.scaleM(partMatrix, 0, sizeX, sizeY, sizeZ)
+        boxRenderer.drawModel(partMatrix, viewMatrix, projectionMatrix, color)
+    }
+
+    companion object {
+        private const val SUPPORTED_MODEL = "primitive://lighthouse-lounge-chair-v1"
+        private val CUSHION = floatArrayOf(0.08f, 0.52f, 0.58f, 1f)
+        private val CUSHION_DARK = floatArrayOf(0.06f, 0.34f, 0.40f, 1f)
+        private val WOOD = floatArrayOf(0.34f, 0.16f, 0.07f, 1f)
+        private val WOOD_LIGHT = floatArrayOf(0.56f, 0.30f, 0.12f, 1f)
     }
 }
 

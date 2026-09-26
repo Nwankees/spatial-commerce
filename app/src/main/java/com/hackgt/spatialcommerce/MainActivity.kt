@@ -28,9 +28,11 @@ class MainActivity : Activity() {
     private lateinit var surfaceView: GLSurfaceView
     private lateinit var renderer: ArRenderer
     private lateinit var statusText: TextView
-    private lateinit var distanceText: TextView
+    private lateinit var infoText: TextView
     private lateinit var measureButton: Button
-    private lateinit var cubeButton: Button
+    private lateinit var previewButton: Button
+    private lateinit var rotationControls: LinearLayout
+    private val previewProduct = PreviewProducts.lighthouseLoungeChair
 
     private var session: Session? = null
     private var installRequested = false
@@ -56,42 +58,55 @@ class MainActivity : Activity() {
             text = "Starting ARCore..."
         }
 
-        distanceText = TextView(this).apply {
+        infoText = TextView(this).apply {
             setTextColor(Color.WHITE)
             setBackgroundColor(Color.argb(210, 26, 29, 36))
-            textSize = 28f
+            textSize = 20f
             gravity = Gravity.CENTER
             setPadding(dp(18), dp(12), dp(18), dp(12))
             text = "Tap two points"
         }
 
         measureButton = modeButton("Measure")
-        cubeButton = modeButton("Place cube")
+        previewButton = modeButton("Preview product")
         val resetButton = modeButton("Reset")
+        val rotateLeftButton = modeButton("Rotate -15°")
+        val rotateRightButton = modeButton("Rotate +15°")
 
         measureButton.setOnClickListener {
             renderer.setMode(InteractionMode.MEASURE)
-            updateModeButtons(InteractionMode.MEASURE)
+            updateModeUi(InteractionMode.MEASURE)
         }
-        cubeButton.setOnClickListener {
-            renderer.setMode(InteractionMode.PLACE_CUBE)
-            updateModeButtons(InteractionMode.PLACE_CUBE)
+        previewButton.setOnClickListener {
+            renderer.setMode(InteractionMode.PREVIEW_PRODUCT)
+            updateModeUi(InteractionMode.PREVIEW_PRODUCT)
         }
         resetButton.setOnClickListener { renderer.reset() }
+        rotateLeftButton.setOnClickListener { renderer.rotateProduct(-15) }
+        rotateRightButton.setOnClickListener { renderer.rotateProduct(15) }
+
+        rotationControls = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER
+            setPadding(dp(12), dp(4), dp(12), 0)
+            addView(rotateLeftButton, weightedButtonParams())
+            addView(rotateRightButton, weightedButtonParams())
+        }
 
         val controls = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER
             setPadding(dp(8), dp(8), dp(8), dp(12))
             addView(measureButton, weightedButtonParams())
-            addView(cubeButton, weightedButtonParams())
+            addView(previewButton, weightedButtonParams())
             addView(resetButton, weightedButtonParams())
         }
 
         val bottomPanel = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             setBackgroundColor(Color.argb(170, 17, 19, 24))
-            addView(distanceText, LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT)
+            addView(infoText, LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT)
+            addView(rotationControls, LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT)
             addView(controls, LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT)
         }
 
@@ -109,9 +124,10 @@ class MainActivity : Activity() {
         val tapQueue = ConcurrentLinkedQueue<TapEvent>()
         renderer = ArRenderer(
             activity = this,
+            product = previewProduct,
             tapQueue = tapQueue,
             onStatus = { text -> statusText.post { statusText.text = text } },
-            onDistance = { text -> distanceText.post { distanceText.text = text } },
+            onInfo = { text -> infoText.post { infoText.text = text } },
         )
         surfaceView.setRenderer(renderer)
         surfaceView.renderMode = GLSurfaceView.RENDERMODE_CONTINUOUSLY
@@ -124,7 +140,7 @@ class MainActivity : Activity() {
                 true
             }
         }
-        updateModeButtons(InteractionMode.MEASURE)
+        updateModeUi(InteractionMode.MEASURE)
     }
 
     override fun onResume() {
@@ -201,9 +217,10 @@ class MainActivity : Activity() {
         windowManager.defaultDisplay.rotation
     }
 
-    private fun updateModeButtons(mode: InteractionMode) {
+    private fun updateModeUi(mode: InteractionMode) {
         measureButton.isEnabled = mode != InteractionMode.MEASURE
-        cubeButton.isEnabled = mode != InteractionMode.PLACE_CUBE
+        previewButton.isEnabled = mode != InteractionMode.PREVIEW_PRODUCT
+        rotationControls.visibility = if (mode == InteractionMode.PREVIEW_PRODUCT) View.VISIBLE else View.GONE
     }
 
     private fun showFatal(message: String) {
@@ -242,5 +259,5 @@ data class TapEvent(val x: Float, val y: Float)
 
 enum class InteractionMode {
     MEASURE,
-    PLACE_CUBE,
+    PREVIEW_PRODUCT,
 }
