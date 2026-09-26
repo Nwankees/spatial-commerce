@@ -1,6 +1,6 @@
 # Spatial Commerce
 
-HackGT 13 project exploring spatially aware conversational commerce. The current working checkpoint is intentionally limited to the Android/ARCore foundation.
+HackGT 13 project exploring spatially aware conversational commerce, with Android/ARCore measurement tools and a physically verified anchored product preview.
 
 ## Milestone 1: Android/ARCore foundation
 
