@@ -1,8 +1,41 @@
+# Gradle and Kotlin caches
 .gradle/
-.idea/
-local.properties
+.kotlin/
 **/build/
-captures/
-*.iml
-tmp/
 
+# Local Android configuration and generated native builds
+local.properties
+captures/
+.externalNativeBuild/
+.cxx/
+
+# IDE and operating-system files
+.idea/
+*.iml
+.vscode/
+.DS_Store
+Thumbs.db
+
+# Local secrets and signing material
+.env
+.env.*
+!.env.example
+secrets.properties
+keystore.properties
+*.jks
+*.keystore
+*.p12
+*.pem
+google-services.json
+service-account*.json
+*-service-account.json
+
+# Packaged artifacts, logs, and crash dumps
+*.apk
+*.aab
+*.ap_
+*.log
+hs_err_pid*
+
+# Local task scratch files
+tmp/
