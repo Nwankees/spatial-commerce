@@ -1,6 +1,6 @@
 # Spatial Commerce
 
-HackGT 13 project exploring spatially aware conversational commerce, with Android/ARCore measurement tools and a physically verified anchored product preview.
+HackGT 13 project exploring spatially aware conversational commerce, with Android/ARCore measurement tools, a physically verified anchored product preview, and on-demand Gemini visual product understanding.
 
 ## Milestone 1: Android/ARCore foundation
 
@@ -30,6 +30,29 @@ The Milestone 2 branch adds a separate **Preview product** mode with a locally a
 - the overlay shows the product name and metric/imperial dimensions.
 
 The model reference is `primitive://lighthouse-lounge-chair-v1`. It is original project geometry built from code, so there is no third-party model or attribution requirement.
+
+## Milestone 3: Gemini visual product understanding
+
+The Android app adds an intentional **Analyze object** action without opening a second camera session. It acquires one CPU camera image from the current ARCore frame, encodes it as JPEG, and sends it to the local backend. The backend:
+
+- keeps `GEMINI_API_KEY` outside the APK and Git;
+- validates and normalizes the image before sending it to Gemini;
+- uses Gemini's schema-constrained JSON output;
+- validates the result again as a typed `VisualProductAnalysis`; and
+- returns category, subcategory, color, materials, style, shape, search keywords, confidence, and a safe no-object result.
+
+The Android client displays progress, structured results, and retryable errors while leaving measurement and product-preview modes intact. It uses `http://127.0.0.1:8000` for USB development; cleartext networking is enabled only for this local Milestone 3 workflow and must be replaced by HTTPS before deployment.
+
+### Milestone 3 physical verification
+
+Milestone 3 was physically verified on September 26, 2026 using the Samsung Galaxy S25:
+
+- intentional one-shot analysis of several real objects completed successfully;
+- Gemini returned reasonable structured product attributes and search keywords: pass;
+- the no-obvious-product path completed safely and allowed retrying: pass;
+- the AR camera remained active and the application did not crash: pass;
+- Milestone 1 measurement and reset still worked: pass; and
+- Milestone 2 placement, rotation, repositioning, and reset still worked: pass.
 
 ### Milestone 2 physical verification
 
@@ -77,6 +100,12 @@ Install it on a connected device:
 adb install -r app\build\outputs\apk\debug\app-debug.apk
 ```
 
+Set up and start the local Gemini backend by following [backend/README.md](backend/README.md), then connect the USB device to it:
+
+```powershell
+adb reverse tcp:8000 tcp:8000
+```
+
 The launcher label is **Spatial Commerce**.
 
 ## Interaction
@@ -95,3 +124,11 @@ For product preview:
 3. Use **Rotate -15°** and **Rotate +15°** to adjust its orientation.
 4. Tap another valid surface to reposition the single product instance.
 5. Select **Measure** to return to two-point measurement, or tap **Reset** to clear every anchor.
+
+For visual analysis:
+
+1. Start the local backend and establish `adb reverse` as described above.
+2. Point the AR camera at one clear physical product.
+3. Tap **Analyze object** once and hold the phone steady briefly.
+4. Review the structured attributes and generated shopping-search phrases in the lower overlay.
+5. Tap **Analyze object** again to analyze the current view, or **Retry analysis** after a recoverable error.

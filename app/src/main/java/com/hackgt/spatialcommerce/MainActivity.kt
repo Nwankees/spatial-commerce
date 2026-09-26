@@ -5,6 +5,8 @@ import android.app.Activity
 import android.content.Context
 import android.content.pm.PackageManager
 import android.graphics.Color
+import android.hardware.camera2.CameraCharacteristics
+import android.hardware.camera2.CameraManager
 import android.opengl.GLSurfaceView
 import android.os.Build
 import android.os.Bundle
@@ -31,8 +33,10 @@ class MainActivity : Activity() {
     private lateinit var infoText: TextView
     private lateinit var measureButton: Button
     private lateinit var previewButton: Button
+    private lateinit var analyzeButton: Button
     private lateinit var rotationControls: LinearLayout
     private val previewProduct = PreviewProducts.lighthouseLoungeChair
+    private val backendClient = GeminiBackendClient()
 
     private var session: Session? = null
     private var installRequested = false
@@ -72,6 +76,9 @@ class MainActivity : Activity() {
         val resetButton = modeButton("Reset")
         val rotateLeftButton = modeButton("Rotate -15°")
         val rotateRightButton = modeButton("Rotate +15°")
+        analyzeButton = modeButton("Analyze object").apply {
+            setPadding(dp(14), 0, dp(14), 0)
+        }
 
         measureButton.setOnClickListener {
             renderer.setMode(InteractionMode.MEASURE)
@@ -84,6 +91,7 @@ class MainActivity : Activity() {
         resetButton.setOnClickListener { renderer.reset() }
         rotateLeftButton.setOnClickListener { renderer.rotateProduct(-15) }
         rotateRightButton.setOnClickListener { renderer.rotateProduct(15) }
+        analyzeButton.setOnClickListener { beginObjectAnalysis() }
 
         rotationControls = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
@@ -116,6 +124,13 @@ class MainActivity : Activity() {
             FrameLayout.LayoutParams(FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.WRAP_CONTENT, Gravity.TOP),
         )
         root.addView(
+            analyzeButton,
+            FrameLayout.LayoutParams(FrameLayout.LayoutParams.WRAP_CONTENT, dp(50), Gravity.TOP or Gravity.END).apply {
+                topMargin = dp(64)
+                marginEnd = dp(12)
+            },
+        )
+        root.addView(
             bottomPanel,
             FrameLayout.LayoutParams(FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.WRAP_CONTENT, Gravity.BOTTOM),
         )
@@ -128,6 +143,8 @@ class MainActivity : Activity() {
             tapQueue = tapQueue,
             onStatus = { text -> statusText.post { statusText.text = text } },
             onInfo = { text -> infoText.post { infoText.text = text } },
+            onCameraFrame = { frame -> onCameraFrameCaptured(frame) },
+            onCameraCaptureError = { message -> showAnalysisError(message) },
         )
         surfaceView.setRenderer(renderer)
         surfaceView.renderMode = GLSurfaceView.RENDERMODE_CONTINUOUSLY
@@ -195,6 +212,7 @@ class MainActivity : Activity() {
 
     override fun onDestroy() {
         renderer.releaseAnchors()
+        backendClient.close()
         session?.close()
         session = null
         super.onDestroy()
@@ -215,6 +233,71 @@ class MainActivity : Activity() {
         display?.rotation ?: Surface.ROTATION_0
     } else {
         windowManager.defaultDisplay.rotation
+    }
+
+    fun cameraImageRotationDegrees(cameraId: String): Int {
+        val cameraManager = getSystemService(CameraManager::class.java)
+        val characteristics = cameraManager.getCameraCharacteristics(cameraId)
+        val sensorOrientation = characteristics.get(CameraCharacteristics.SENSOR_ORIENTATION) ?: 0
+        val deviceOrientation = when (currentDisplayRotation()) {
+            Surface.ROTATION_90 -> 90
+            Surface.ROTATION_180 -> 180
+            Surface.ROTATION_270 -> 270
+            else -> 0
+        }
+        return if (characteristics.get(CameraCharacteristics.LENS_FACING) == CameraCharacteristics.LENS_FACING_FRONT) {
+            (sensorOrientation + deviceOrientation) % 360
+        } else {
+            (sensorOrientation - deviceOrientation + 360) % 360
+        }
+    }
+
+    private fun beginObjectAnalysis() {
+        analyzeButton.isEnabled = false
+        analyzeButton.text = "Capturing…"
+        infoText.text = "Hold steady while the current camera view is captured."
+        statusText.text = "Capturing one AR camera frame…"
+        renderer.requestCameraCapture()
+    }
+
+    private fun onCameraFrameCaptured(frame: CapturedCameraFrame) {
+        runOnUiThread {
+            analyzeButton.text = "Analyzing…"
+            infoText.text = "Gemini is identifying the principal product and its visible attributes."
+            statusText.text = "Analyzing object…"
+        }
+        backendClient.analyze(frame) { result ->
+            runOnUiThread {
+                result.fold(
+                    onSuccess = { analysis ->
+                        infoText.text = analysis.overlayText()
+                        statusText.text = if (analysis.objectDetected) {
+                            "Analysis complete. Tap Analyze object to inspect the current view again."
+                        } else {
+                            "No obvious product found. Center one object and retry."
+                        }
+                        analyzeButton.text = "Analyze object"
+                        analyzeButton.isEnabled = true
+                    },
+                    onFailure = { exception ->
+                        finishAnalysisWithError(
+                            exception.message ?: "Analysis failed. Please retry.",
+                        )
+                    },
+                )
+            }
+        }
+    }
+
+    private fun showAnalysisError(message: String) {
+        runOnUiThread { finishAnalysisWithError(message) }
+    }
+
+    private fun finishAnalysisWithError(message: String) {
+        infoText.text = message
+        statusText.text = "Object analysis did not complete."
+        analyzeButton.text = "Retry analysis"
+        analyzeButton.isEnabled = true
     }
 
     private fun updateModeUi(mode: InteractionMode) {

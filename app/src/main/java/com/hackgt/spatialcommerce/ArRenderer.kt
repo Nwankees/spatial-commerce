@@ -12,6 +12,7 @@ import com.google.ar.core.Point
 import com.google.ar.core.Session
 import com.google.ar.core.TrackingState
 import com.google.ar.core.exceptions.CameraNotAvailableException
+import com.google.ar.core.exceptions.NotYetAvailableException
 import java.util.Locale
 import java.util.concurrent.ConcurrentLinkedQueue
 import java.util.concurrent.atomic.AtomicInteger
@@ -25,6 +26,8 @@ class ArRenderer(
     private val tapQueue: ConcurrentLinkedQueue<TapEvent>,
     private val onStatus: (String) -> Unit,
     private val onInfo: (String) -> Unit,
+    private val onCameraFrame: (CapturedCameraFrame) -> Unit,
+    private val onCameraCaptureError: (String) -> Unit,
 ) : GLSurfaceView.Renderer {
     private val backgroundRenderer = CameraBackgroundRenderer()
     private val boxRenderer = BoxRenderer()
@@ -44,6 +47,9 @@ class ArRenderer(
     private var viewportHeight = 1
     private var lastStatus = ""
     private var lastInfo = ""
+    @Volatile
+    private var cameraCaptureRequested = false
+    private var cameraCaptureAttempts = 0
     private val viewMatrix = FloatArray(16)
     private val projectionMatrix = FloatArray(16)
 
@@ -57,12 +63,17 @@ class ArRenderer(
     fun setMode(newMode: InteractionMode) {
         mode = newMode
         if (newMode == InteractionMode.MEASURE) {
-            publishInfo(if (measurementAnchors.size == 2) formatDistance(distanceMeters(measurementAnchors[0], measurementAnchors[1])) else "Tap two points")
+            forcePublishInfo(if (measurementAnchors.size == 2) formatDistance(distanceMeters(measurementAnchors[0], measurementAnchors[1])) else "Tap two points")
             publishStatus(measurementPrompt())
         } else {
-            publishInfo(product.overlayText())
+            forcePublishInfo(product.overlayText())
             publishStatus(previewPrompt())
         }
+    }
+
+    fun requestCameraCapture() {
+        cameraCaptureAttempts = 0
+        cameraCaptureRequested = true
     }
 
     fun reset() {
@@ -122,6 +133,7 @@ class ArRenderer(
         }
 
         backgroundRenderer.draw(frame)
+        captureCameraFrameIfRequested(frame, arSession)
         val camera = frame.camera
         if (camera.trackingState != TrackingState.TRACKING) {
             publishStatus("Move the phone slowly so ARCore can find surfaces.")
@@ -162,6 +174,30 @@ class ArRenderer(
     }
 
     fun releaseAnchors() = clearAnchors()
+
+    private fun captureCameraFrameIfRequested(frame: Frame, arSession: Session) {
+        if (!cameraCaptureRequested) return
+        cameraCaptureAttempts += 1
+        try {
+            val jpegBytes = frame.acquireCameraImage().use(CameraFrameEncoder::toJpeg)
+            val rotationDegrees = activity.cameraImageRotationDegrees(arSession.cameraConfig.cameraId)
+            cameraCaptureRequested = false
+            cameraCaptureAttempts = 0
+            onCameraFrame(CapturedCameraFrame(jpegBytes, rotationDegrees))
+        } catch (_: NotYetAvailableException) {
+            if (cameraCaptureAttempts >= MAX_CAMERA_CAPTURE_ATTEMPTS) {
+                cameraCaptureRequested = false
+                cameraCaptureAttempts = 0
+                onCameraCaptureError("A camera frame was not available. Keep the phone steady and retry.")
+            }
+        } catch (exception: Exception) {
+            cameraCaptureRequested = false
+            cameraCaptureAttempts = 0
+            onCameraCaptureError(
+                exception.message ?: "The current AR camera frame could not be captured.",
+            )
+        }
+    }
 
     private fun processTap(frame: Frame) {
         val tap = tapQueue.poll() ?: return
@@ -270,8 +306,14 @@ class ArRenderer(
         }
     }
 
+    private fun forcePublishInfo(message: String) {
+        lastInfo = message
+        onInfo(message)
+    }
+
     companion object {
         private val FIRST_MARKER_COLOR = floatArrayOf(0.18f, 0.82f, 1f, 1f)
         private val SECOND_MARKER_COLOR = floatArrayOf(1f, 0.35f, 0.55f, 1f)
+        private const val MAX_CAMERA_CAPTURE_ATTEMPTS = 90
     }
 }
