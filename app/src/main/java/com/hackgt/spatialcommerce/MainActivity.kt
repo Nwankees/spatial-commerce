@@ -3,11 +3,13 @@ package com.hackgt.spatialcommerce
 import android.Manifest
 import android.app.Activity
 import android.content.Context
+import android.content.Intent
 import android.content.pm.PackageManager
 import android.graphics.Color
 import android.hardware.camera2.CameraCharacteristics
 import android.hardware.camera2.CameraManager
 import android.opengl.GLSurfaceView
+import android.net.Uri
 import android.os.Build
 import android.os.Bundle
 import android.view.Gravity
@@ -42,9 +44,17 @@ class MainActivity : Activity() {
     private val previewProduct = PreviewProducts.lighthouseLoungeChair
     private val backendClient = GeminiBackendClient()
     private val productSearchClient = ProductSearchClient()
+    private val arPreviewClient = ArPreviewClient()
+    private var currentMode = InteractionMode.MEASURE
+
+    // Milestone 6 state. Only touched on the UI thread.
+    private var arGeneration = 0
+    private var arRequestInFlight = false
 
     // Milestone 4 state. Only touched on the UI thread.
     private var lastAnalysis: VisualProductAnalysis? = null
+    /** Exact ARCore camera frame used for lastAnalysis and subsequent visual search. */
+    private var lastAnalyzedFrame: CapturedCameraFrame? = null
     private var analysisGeneration = 0
     private var productSearchInFlight = false
     private var lastProductSearch: ProductSearchResult? = null
@@ -56,8 +66,10 @@ class MainActivity : Activity() {
     private var availableDepthMeters: Double? = null
     private var fitProduct: ProductCandidate? = null
     private var fitDimensions: ResolvedDimensions? = null
+    private var latestFitResult: FitResult? = null
     private var fitGeneration = 0
     private var fitLookupInFlight = false
+    @Volatile private var arPreviewStartedElapsedRealtime = 0L
 
     private var session: Session? = null
     private var installRequested = false
@@ -111,7 +123,7 @@ class MainActivity : Activity() {
             updateModeUi(InteractionMode.PREVIEW_PRODUCT)
         }
         measureSpaceButton.setOnClickListener { enterMeasureSpace() }
-        resetButton.setOnClickListener { renderer.reset() }
+        resetButton.setOnClickListener { resetArScene() }
         rotateLeftButton.setOnClickListener { renderer.rotateProduct(-15) }
         rotateRightButton.setOnClickListener { renderer.rotateProduct(15) }
         analyzeButton.setOnClickListener { beginObjectAnalysis() }
@@ -130,6 +142,11 @@ class MainActivity : Activity() {
             context = this,
             onMeasureSpace = { enterMeasureSpace() },
             onRetry = { beginFitCheck() },
+            onViewInSpace = { beginRealProductPreview() },
+            onViewSource = { url ->
+                runCatching { startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(url))) }
+                    .onFailure { Toast.makeText(this, "Could not open the source page.", Toast.LENGTH_SHORT).show() }
+            },
         )
 
         rotationControls = LinearLayout(this).apply {
@@ -185,27 +202,42 @@ class MainActivity : Activity() {
         )
         setContentView(root)
 
-        val tapQueue = ConcurrentLinkedQueue<TapEvent>()
+        val touchQueue = ConcurrentLinkedQueue<SurfaceTouchEvent>()
         renderer = ArRenderer(
             activity = this,
             product = previewProduct,
-            tapQueue = tapQueue,
+            touchQueue = touchQueue,
             onStatus = { text -> statusText.post { statusText.text = text } },
             onInfo = { text -> infoText.post { infoText.text = text } },
             onCameraFrame = { frame -> onCameraFrameCaptured(frame) },
             onCameraCaptureError = { message -> showAnalysisError(message) },
             onSpaceMeasured = { width, depth -> runOnUiThread { onAvailableSpaceMeasured(width, depth) } },
+            onRealProductError = { message -> runOnUiThread { failRealProductPreview(message, retryable = false) } },
+            onRealProductVisible = { placement, uploadMillis ->
+                val totalMillis = android.os.SystemClock.elapsedRealtime() - arPreviewStartedElapsedRealtime
+                android.util.Log.i(
+                    "SpatialCommerceM6",
+                    "visible placement=$placement textureDecodeUpload=${uploadMillis}ms perceivedTotal=${totalMillis}ms",
+                )
+            },
         )
         surfaceView.setRenderer(renderer)
         surfaceView.renderMode = GLSurfaceView.RENDERMODE_CONTINUOUSLY
         surfaceView.setOnTouchListener { view, event ->
-            if (event.action == MotionEvent.ACTION_UP) {
-                tapQueue.add(TapEvent(event.x, event.y))
-                view.performClick()
-                true
-            } else {
-                true
+            val action = when (event.actionMasked) {
+                MotionEvent.ACTION_DOWN -> SurfaceTouchAction.DOWN
+                MotionEvent.ACTION_MOVE -> SurfaceTouchAction.MOVE
+                MotionEvent.ACTION_UP -> SurfaceTouchAction.UP
+                MotionEvent.ACTION_CANCEL -> SurfaceTouchAction.CANCEL
+                else -> null
             }
+            if (action != null) {
+                touchQueue.add(SurfaceTouchEvent(action, event.x, event.y))
+            }
+            if (event.actionMasked == MotionEvent.ACTION_UP) {
+                view.performClick()
+            }
+            true
         }
         updateModeUi(InteractionMode.MEASURE)
     }
@@ -264,6 +296,7 @@ class MainActivity : Activity() {
         renderer.releaseAnchors()
         backendClient.close()
         productSearchClient.close()
+        arPreviewClient.close()
         session?.close()
         session = null
         super.onDestroy()
@@ -307,6 +340,7 @@ class MainActivity : Activity() {
         // A new analysis supersedes the previous object; stale search results are ignored.
         analysisGeneration += 1
         lastAnalysis = null
+        lastAnalyzedFrame = null
         productSearchInFlight = false
         findProductsButton.visibility = View.GONE
         resultsPanel.visibility = View.GONE
@@ -335,6 +369,7 @@ class MainActivity : Activity() {
                         }
                         if (analysis.objectDetected) {
                             lastAnalysis = analysis
+                            lastAnalyzedFrame = frame
                             findProductsButton.text = "Find similar products"
                             findProductsButton.isEnabled = true
                             findProductsButton.visibility = View.VISIBLE
@@ -354,15 +389,16 @@ class MainActivity : Activity() {
 
     private fun beginProductSearch() {
         val analysis = lastAnalysis ?: return
+        val frame = lastAnalyzedFrame ?: return
         if (productSearchInFlight) return
         productSearchInFlight = true
         val generation = analysisGeneration
         findProductsButton.isEnabled = false
         findProductsButton.text = "Searching…"
         resultsPanel.showLoading()
-        statusText.text = "Searching for real purchasable products…"
+        statusText.text = "Running visual + product search…"
 
-        productSearchClient.search(analysis) { result ->
+        productSearchClient.search(analysis, frame) { result ->
             runOnUiThread {
                 if (generation != analysisGeneration) return@runOnUiThread
                 productSearchInFlight = false
@@ -375,7 +411,7 @@ class MainActivity : Activity() {
                         statusText.text = when {
                             search.products.isEmpty() -> "No purchasable matches found. Retry or analyze another object."
                             search.isCached -> "Showing cached results; live search is unavailable. Tap a product to select it."
-                            else -> "Found ${search.products.size} real products. Tap one to select it."
+                            else -> "Found ${search.products.size} visually ranked products. Tap one to select it."
                         }
                     },
                     onFailure = { exception ->
@@ -395,7 +431,7 @@ class MainActivity : Activity() {
         resultsPanel.markSelected(product.id)
         val retailer = product.retailer?.let { " at $it" }.orEmpty()
         statusText.text = "Selected: ${product.title} — ${product.displayPrice()}$retailer. " +
-            "AR preview still shows only the Lighthouse chair."
+            "Check fit, then View in my space for a real-scale 3D preview."
     }
 
     private fun beginFitCheck() {
@@ -430,19 +466,40 @@ class MainActivity : Activity() {
     /** Re-evaluates the deterministic fit whenever dimensions or measurements change. */
     private fun refreshFit() {
         val dimensions = fitDimensions ?: return
+        val footprint = dimensions.verifiedFootprint()
         val result = FitEngine.evaluate(
-            productWidthMeters = dimensions.widthMeters,
-            productDepthMeters = dimensions.depthMeters,
+            productWidthMeters = footprint?.first,
+            productDepthMeters = footprint?.second,
             availableWidthMeters = availableWidthMeters,
             availableDepthMeters = availableDepthMeters,
         )
+        latestFitResult = result
         fitPanel.show(result, dimensions)
         statusText.text = when (result.verdict) {
             FitVerdict.FITS -> "Fit check: FITS the measured space."
             FitVerdict.DOES_NOT_FIT -> "Fit check: DOES NOT FIT the measured space."
-            FitVerdict.UNKNOWN -> "Fit check: UNKNOWN — explicit width and depth are unavailable."
+            FitVerdict.UNKNOWN -> if (dimensions.hasVerifiedTriple()) {
+                "Retailer dimensions found; axis order is unresolved until the 3D mesh is generated."
+            } else {
+                "No trustworthy product footprint dimensions were found."
+            }
             FitVerdict.NEEDS_MEASUREMENT -> "Fit check: measure the available width and depth."
         }
+    }
+
+    private fun ResolvedDimensions.hasVerifiedTriple(): Boolean =
+        status == "verified" && dimensionsMeters.size == 3 && dimensionsMeters.all { it > 0.0 }
+
+    /**
+     * Returns two retailer-backed horizontal values when the source establishes
+     * them. Their order is irrelevant because FitEngine checks a 90° rotation.
+     */
+    private fun ResolvedDimensions.verifiedFootprint(): Pair<Double, Double>? {
+        if (widthMeters != null && depthMeters != null) return widthMeters to depthMeters
+        if (!hasVerifiedTriple()) return null
+        val heightIndex = axisMapping?.heightIndex ?: return null
+        val horizontal = dimensionsMeters.filterIndexed { index, _ -> index != heightIndex }
+        return if (horizontal.size == 2) horizontal[0] to horizontal[1] else null
     }
 
     private fun onAvailableSpaceMeasured(width: Float?, depth: Float?) {
@@ -457,11 +514,135 @@ class MainActivity : Activity() {
         resultsPanel.visibility = View.GONE
     }
 
+    private fun resetArScene() {
+        arGeneration += 1
+        arRequestInFlight = false
+        arPreviewClient.cancel()
+        renderer.reset()
+        fitDimensions?.takeIf(FitPanel::hasVerifiedSize)?.let {
+            fitPanel.setArState("AR placement reset. The verified preview is ready to load again.", "View in my space")
+        }
+    }
+
+    private fun beginRealProductPreview() {
+        val product = fitProduct ?: return
+        val dimensions = fitDimensions ?: return
+        if (arRequestInFlight) return
+        if (!FitPanel.hasVerifiedSize(dimensions)) {
+            fitPanel.setArState(FitPanel.REAL_SCALE_UNAVAILABLE, null)
+            return
+        }
+        arGeneration += 1
+        val generation = arGeneration
+        arRequestInFlight = true
+        fitPanel.setArState("Generating 3D preview… The first run for a product can take a minute.", "Generating…", enabled = false)
+        statusText.text = "Generating 3D preview of ${product.title.take(50)}…"
+        arPreviewStartedElapsedRealtime = android.os.SystemClock.elapsedRealtime()
+        val started = System.currentTimeMillis()
+        arPreviewClient.request(
+            product,
+            onProgress = { _ ->
+                runOnUiThread {
+                    if (generation != arGeneration) return@runOnUiThread
+                    val seconds = (System.currentTimeMillis() - started) / 1000
+                    statusText.text = "Generating 3D preview… ${seconds}s"
+                }
+            },
+        ) { result ->
+            runOnUiThread {
+                if (generation != arGeneration) return@runOnUiThread
+                arRequestInFlight = false
+                result.fold(
+                    onSuccess = { asset -> showRealProduct(product, asset, System.currentTimeMillis() - started) },
+                    onFailure = { e ->
+                        val status = (e as? ArPreviewClient.ArPreviewException)?.status
+                        failRealProductPreview(
+                            e.message ?: "3D preview failed. Please retry.",
+                            retryable = status?.retryable ?: (status == null),
+                            unavailable = status?.status == "unavailable",
+                        )
+                    },
+                )
+            }
+        }
+    }
+
+    private fun showRealProduct(product: ProductCandidate, asset: LoadedArAsset, elapsedMillis: Long) {
+        val scale = asset.status.scale
+        if (scale == null) {
+            failRealProductPreview(FitPanel.REAL_SCALE_UNAVAILABLE, retryable = false, unavailable = true)
+            return
+        }
+        val b = asset.mesh.bounds()
+        val size = floatArrayOf(b[3] - b[0], b[4] - b[1], b[5] - b[2])
+        if (!ArPreviewMath.matchesVerified(size, scale)) {
+            failRealProductPreview("The 3D preview did not match the verified dimensions, so it is not shown.", retryable = false)
+            return
+        }
+        // Mesh-assisted axis mapping can make W/D known only after reconstruction. Re-run the
+        // deterministic footprint check so automatic placement uses the correct 90° orientation.
+        val placementFit = FitEngine.evaluate(
+            productWidthMeters = scale.widthMeters,
+            productDepthMeters = scale.depthMeters,
+            availableWidthMeters = availableWidthMeters,
+            availableDepthMeters = availableDepthMeters,
+        )
+        latestFitResult = placementFit
+        fitDimensions?.let { fitPanel.show(placementFit, it) }
+        renderer.setRealProduct(
+            asset.mesh,
+            scale,
+            product.title,
+            rotateToFit = placementFit.rotatedToFit,
+        )
+        renderer.setMode(InteractionMode.PREVIEW_REAL_PRODUCT)
+        updateModeUi(InteractionMode.PREVIEW_REAL_PRODUCT)
+        resultsPanel.visibility = View.GONE
+        val timing = String.format(
+            java.util.Locale.US, "%s in %.1fs",
+            if (asset.status.cached) "Cached" else "Generated", elapsedMillis / 1000.0,
+        )
+        fitPanel.setArState("${asset.status.previewLabel} ($timing)", "View in my space")
+        val serverBreakdown = asset.status.timings.entries
+            .sortedBy { it.key }
+            .joinToString(" ") { (key, value) -> "$key=${String.format(java.util.Locale.US, "%.3f", value)}s" }
+        android.util.Log.i(
+            "SpatialCommerceM6",
+            "asset=${asset.status.assetId} cache=${asset.status.cacheOutcome} cached=${asset.status.cached} " +
+                "dimensionPath=${asset.status.dimensionLookupPath} dimensionCache=${asset.status.dimensionLookupCacheHit} " +
+                "phonePrepare=${asset.preparationMillis}ms phoneDownload=${asset.downloadMillis}ms " +
+                "phoneParse=${asset.parseMillis}ms callbackTotal=${elapsedMillis}ms " +
+                "bytes=${asset.status.glbBytes} vertices=${asset.mesh.vertexCount} server=[$serverBreakdown]",
+        )
+    }
+
+    private fun failRealProductPreview(message: String, retryable: Boolean, unavailable: Boolean = false) {
+        arRequestInFlight = false
+        // Never fall back to the built-in chair for a selected real product.
+        if (currentMode == InteractionMode.PREVIEW_REAL_PRODUCT) {
+            renderer.clearRealProduct()
+            renderer.setMode(InteractionMode.MEASURE)
+            updateModeUi(InteractionMode.MEASURE)
+        }
+        val text = if (unavailable) message else "3D preview unavailable: $message"
+        fitPanel.setArState(text, if (retryable) "Retry 3D preview" else null)
+        statusText.text = "3D preview did not complete."
+    }
+
     private fun clearFitCheck() {
+        arGeneration += 1
+        arRequestInFlight = false
+        arPreviewClient.cancel()
+        renderer.clearRealProduct()
+        if (currentMode == InteractionMode.PREVIEW_REAL_PRODUCT) {
+            renderer.setMode(InteractionMode.MEASURE)
+            updateModeUi(InteractionMode.MEASURE)
+        }
         fitGeneration += 1
         fitLookupInFlight = false
         fitProduct = null
         fitDimensions = null
+        latestFitResult = null
         fitPanel.visibility = View.GONE
     }
 
@@ -477,10 +658,12 @@ class MainActivity : Activity() {
     }
 
     private fun updateModeUi(mode: InteractionMode) {
+        currentMode = mode
         measureButton.isEnabled = mode != InteractionMode.MEASURE
         previewButton.isEnabled = mode != InteractionMode.PREVIEW_PRODUCT
         measureSpaceButton.isEnabled = mode != InteractionMode.MEASURE_SPACE
-        rotationControls.visibility = if (mode == InteractionMode.PREVIEW_PRODUCT) View.VISIBLE else View.GONE
+        rotationControls.visibility =
+            if (mode == InteractionMode.PREVIEW_PRODUCT || mode == InteractionMode.PREVIEW_REAL_PRODUCT) View.VISIBLE else View.GONE
     }
 
     private fun showFatal(message: String) {
@@ -515,10 +698,14 @@ private class TapSurfaceView(context: Context) : GLSurfaceView(context) {
     }
 }
 
-data class TapEvent(val x: Float, val y: Float)
+enum class SurfaceTouchAction { DOWN, MOVE, UP, CANCEL }
+
+data class SurfaceTouchEvent(val action: SurfaceTouchAction, val x: Float, val y: Float)
 
 enum class InteractionMode {
     MEASURE,
     PREVIEW_PRODUCT,
     MEASURE_SPACE,
+    /** Milestone 6: the selected real product, reconstructed and scaled to verified dimensions. */
+    PREVIEW_REAL_PRODUCT,
 }

@@ -1,31 +1,42 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 import logging
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from typing import Any, Protocol
 from urllib.parse import urlparse
 
-from typing import Protocol
-
-from .dimension_evidence import DEFAULT_MAX_CHARS, build_dimension_evidence
-from .dimension_extraction import SOURCE_PRIORITY, SourceFinding, extract_from_features, extract_from_html
-from .dimension_llm import DimensionExtraction, DimensionExtractionError, extract_and_validate
-from .dimension_models import ResolvedDimensions
-from .dimension_parsing import DimensionCandidate, parse_field
+from .dimension_models import AxisMapping, ResolvedDimensions
+from .dimension_parsing import DimensionCandidate, axis_for_field_label, parse_field, parse_labeled_dimensions
+from .dimension_semantic import (
+    AxisAssignment,
+    DimensionExtractionError,
+    SemanticExtraction,
+    SemanticResult,
+    validate_semantic,
+)
 from .page_fetcher import FetchedPage, PageFetcher, PageFetchError, is_public_http_url
+from .page_representation import (
+    DEFAULT_MAX_CHARS,
+    PageRepresentation,
+    build_page_representation,
+    build_provider_representation,
+)
 from .product_details import ProductDetailSource, StoreLink
 from .product_models import ProductCandidate
 from .product_providers import ProductProviderError, ProductProviderNotConfiguredError
 from .variant_context import build_variant_context
-from .variant_scope import find_variant_records, ids_for_selected_options, record_evidence
+from .variant_scope import ids_for_selected_options
 
 logger = logging.getLogger(__name__)
 MAX_RETAILER_PAGES = 2
+MAX_LLM_CALLS = 3
 
 
 class DimensionExtractor(Protocol):
-    async def extract(self, evidence: str) -> DimensionExtraction: ...
+    async def extract(self, rep: PageRepresentation, page_json: str) -> SemanticExtraction: ...
 
 
 @dataclass(frozen=True)
@@ -34,28 +45,52 @@ class _Failure:
     retryable: bool
 
 
-@dataclass(frozen=True)
-class _NamedFinding:
-    finding: SourceFinding
+@dataclass
+class _Outcome:
+    values_m: list[float]
+    axis: AxisAssignment
+    scope: str  # exact_record | exact_page | family | page
+    method: str  # structured | llm
+    source_type: str
+    source_path: str | None
+    raw_text: str | None
     source_name: str | None
-    scope: str = "page"  # exact_record | exact_page | family | page
+    source_url: str | None
+    labeled: dict[str, float] = field(default_factory=dict)
+
+    @property
+    def count(self) -> int:
+        return len(self.values_m)
+
+
+@dataclass
+class Attempt:
+    """Debug trace of one representation (for the integration script / logs)."""
+    name: str | None
+    url: str | None
+    scope: str
+    rep: PageRepresentation
+    page_json: str | None = None
+    fast_path: dict[str, float] | None = None
+    raw_llm: str | None = None
+    extraction: SemanticExtraction | None = None
+    validation: SemanticResult | None = None
+    llm_seconds: float | None = None
+    error: str | None = None
 
 
 class DimensionResolver:
-    """Resolves trustworthy dimensions for one selected product.
+    """Resolves trustworthy overall dimensions for one selected product.
 
-    Hierarchy (highest first):
-      1. provider product-detail structured specs (SerpApi 'about_the_product' fields)
-      2. retailer JSON-LD
-      3. retailer structured metadata (microdata) and specification tables
-      4. cleaned retailer spec/page text -> local LLM *extraction* -> deterministic validation
-      5. deterministic labeled-text parsing of the page (legacy fallback)
-      6. unavailable
-    A source stating all three axes wins by priority; otherwise the highest priority
-    source with width and depth; otherwise any partial result. Sources are never
-    mixed and nothing is estimated. Cheaper sources short-circuit: retailer pages are
-    only fetched when the provider lacks width+depth, and the LLM only runs when no
-    structured page source has them.
+    Pipeline per source (exact selected-variant page first, then provider family specs,
+    then other retailer pages): page -> generic structured representation (noise removed,
+    structure kept, sibling variants excluded when the exact item is known) ->
+      * fast path: explicit, separately labeled Width/Depth/Height fields in structured data;
+      * otherwise the local model (qwen3:4b-instruct) chooses the field that states the
+        overall dimensions -> deterministic provenance validation (source exists, every
+        number/unit literally present, one section, selected variant) -> meters in code.
+    Values from different sources are never mixed and nothing is estimated. A source with
+    three values wins over partial ones; then exact variant > product family > other pages.
     """
 
     def __init__(
@@ -64,21 +99,24 @@ class DimensionResolver:
         page_fetcher: PageFetcher,
         *,
         extractor: DimensionExtractor | None = None,
-        evidence_max_chars: int = DEFAULT_MAX_CHARS,
+        page_max_chars: int = DEFAULT_MAX_CHARS,
         max_pages: int = MAX_RETAILER_PAGES,
+        max_llm_calls: int = MAX_LLM_CALLS,
+        **_: Any,
     ) -> None:
         self._detail_source = detail_source
         self._page_fetcher = page_fetcher
         self._extractor = extractor
-        self._evidence_max_chars = evidence_max_chars
+        self._page_max_chars = page_max_chars
         self._max_pages = max_pages
+        self._max_llm_calls = max_llm_calls
         self.last_trace: dict[str, object] = {}
 
     async def resolve(self, candidate: ProductCandidate) -> ResolvedDimensions:
         try:
             return await self._resolve(candidate)
         except Exception as exc:  # Never let resolution failures escape as 500s.
-            logger.warning("Dimension resolution failed unexpectedly: %s", type(exc).__name__)
+            logger.warning("Dimension resolution failed unexpectedly: %s", type(exc).__name__, exc_info=True)
             return ResolvedDimensions(
                 productId=candidate.id,
                 retryable=True,
@@ -86,11 +124,13 @@ class DimensionResolver:
             )
 
     async def _resolve(self, candidate: ProductCandidate) -> ResolvedDimensions:
-        findings: list[_NamedFinding] = []
+        outcomes: list[_Outcome] = []
         failures: list[_Failure] = []
         stores: list[StoreLink] = []
-        trace: dict[str, object] = {}
+        attempts: list[Attempt] = []
+        trace: dict[str, object] = {"attempts": attempts}
         self.last_trace = trace
+        self._llm_calls = 0
         direct_url = candidate.productUrl if _is_retailer_url(candidate.productUrl) else None
         if direct_url:
             stores.append(StoreLink(candidate.retailer, direct_url, None, candidate.price))
@@ -104,8 +144,6 @@ class DimensionResolver:
             except ProductProviderError as exc:
                 failures.append(_Failure(str(exc), True))
             if detail is not None:
-                for finding in extract_from_features(detail.features, candidate.productUrl):
-                    findings.append(_NamedFinding(finding, detail.source_name, scope="family"))
                 stores.extend(_order_stores(detail.stores, candidate.retailer))
 
         context = build_variant_context(
@@ -113,83 +151,90 @@ class DimensionResolver:
             detail.stores if detail else [], detail.selected_options if detail else {}, direct_url,
         )
         trace["variant_context"] = context
-        fetched: list[tuple[StoreLink, FetchedPage]] = []
         attempted: set[str] = set()
+        complete = False
 
-        # 1. Exact variant identity: the selected offer's own retailer record/page outranks
-        #    SerpApi's product-family specs. Explicit selected options can establish the
-        #    identity only when they match exactly one item ID in the retailer's own data.
-        if context.identity == "options_only" and context.offer is not None:
+        # 1. The exact selected variant's own retailer page (sibling variants excluded).
+        if context.offer is not None and context.identity in ("options_only", "exact_item", "exact_offer"):
             offer_store = StoreLink(context.offer.storeName, context.offer.storeUrl, context.offer.storeTitle, context.offer.price)
             attempted.add(offer_store.url)
             page = await self._fetch(offer_store, failures)
-            if page is not None:
-                fetched.append((offer_store, page))
+            if page is not None and context.identity == "options_only":
                 matches = ids_for_selected_options(page.html, context.selectedOptions)
                 trace["option_matches"] = sorted(matches)
                 if len(matches) == 1:
                     context.retailerIds.variantId = next(iter(matches))
                     context.identity = "exact_item"
                     context.reason = "identified by explicitly selected options"
-                    await self._exact_findings(context, offer_store, page, findings, failures, trace, page_level=False)
                 else:
                     context.reason = ("selected options match no single retailer item"
                                       if not matches else "selected options match several retailer items")
-        elif context.exact and context.offer is not None:
-            offer_store = StoreLink(context.offer.storeName, context.offer.storeUrl, context.offer.storeTitle, context.offer.price)
-            attempted.add(offer_store.url)
-            page = await self._fetch(offer_store, failures)
-            if page is not None:
-                fetched.append((offer_store, page))
-                await self._exact_findings(context, offer_store, page, findings, failures, trace)
+            if page is not None and context.exact:
+                rep = build_page_representation(
+                    page.html, page.url, product_title=candidate.title, retailer=candidate.retailer,
+                    context=context, exact_ids=context.retailerIds.all())
+                if rep.variant_mismatch:
+                    failures.append(_Failure(f"{offer_store.name or 'Retailer'}: the page is for a different item "
+                                             f"than the selected variant.", False))
+                else:
+                    complete = await self._consider(rep, f"{offer_store.name or 'Retailer'} (selected variant)",
+                                                    page.url, "exact", outcomes, failures, attempts)
 
-        # 2. Otherwise (or if the exact offer gave no width+depth): SerpApi family specs,
-        #    then other retailer pages, as before.
-        pages: list[StoreLink] = []
-        if not _has_footprint(findings):
+        # 2. Provider (SerpApi) product-family specifications.
+        if not complete and detail is not None and detail.features:
+            rep = build_provider_representation(detail.features, product_title=candidate.title,
+                                                retailer=candidate.retailer, source_name=detail.source_name)
+            complete = await self._consider(rep, detail.source_name, candidate.productUrl, "family",
+                                            outcomes, failures, attempts)
+
+        # 3. Other retailer pages for the product (not variant-exact).
+        if not complete:
             pages = [s for s in _unique_pages(stores) if s.url not in attempted][: self._max_pages]
             results = await asyncio.gather(*(self._page_fetcher.fetch(s.url) for s in pages), return_exceptions=True)
             for store, result in zip(pages, results):
                 if isinstance(result, PageFetchError):
                     failures.append(_Failure(f"{store.name or 'Retailer'}: {result}", result.retryable))
-                elif isinstance(result, BaseException):
+                    continue
+                if isinstance(result, BaseException):
                     failures.append(_Failure(f"{store.name or 'Retailer'}: page could not be read.", True))
-                else:
-                    fetched.append((store, result))
-                    for finding in extract_from_html(result.html, result.url):
-                        findings.append(_NamedFinding(finding, store.name, scope="page"))
+                    continue
+                rep = build_page_representation(result.html, result.url, product_title=candidate.title,
+                                                retailer=candidate.retailer, context=context)
+                if await self._consider(rep, store.name, result.url, "page", outcomes, failures, attempts):
+                    break
 
-            if self._extractor is not None and not _has_footprint(findings, exclude=("page_text",)):
-                for store, page in fetched:
-                    if store.url in attempted:
-                        continue  # the exact offer page was already handled in step 1
-                    if await self._llm_finding(page.html and build_dimension_evidence(page.html, self._evidence_max_chars),
-                                               page.url, store.name, "page", findings, failures):
-                        break
-
-        chosen = _choose(findings)
+        chosen = _choose(outcomes)
         trace["chosen"] = chosen
         if chosen is not None:
-            c = chosen.finding.candidate
+            axis = chosen.axis
+            values = chosen.values_m
+
+            def axis_value(index: int | None) -> float | None:
+                return values[index] if index is not None and index < len(values) else None
+
             return ResolvedDimensions(
                 productId=candidate.id,
-                widthMeters=c.width,
-                depthMeters=c.depth,
-                heightMeters=c.height,
-                sourceType=chosen.finding.source_type,
-                sourceUrl=chosen.finding.source_url,
+                widthMeters=axis_value(axis.widthIndex),
+                depthMeters=axis_value(axis.depthIndex),
+                heightMeters=axis_value(axis.heightIndex),
+                dimensionsMeters=values,
+                axisMapping=AxisMapping(**axis.as_dict()),
+                sourceType=_SOURCE_TYPE.get(chosen.source_type, "page_text"),
+                sourceUrl=chosen.source_url,
                 sourceName=chosen.source_name,
-                rawDimensions=c.raw_text(),
+                rawDimensions=chosen.raw_text,
+                sourcePath=chosen.source_path,
+                extractionMethod=chosen.method,  # type: ignore[arg-type]
                 variantScope=_SCOPE_LABEL[chosen.scope],
                 variantIdentity=context.describe() if chosen.scope.startswith("exact") else None,
             )
 
         if not stores and not candidate.detailPageToken:
             message = "No retailer page or product details are available for this product."
-        elif failures and all(not f.retryable for f in failures) and not findings:
-            message = "No explicit dimensions found. " + "; ".join(f.message for f in failures[:3])
+        elif failures and all(not f.retryable for f in failures):
+            message = "No trustworthy product dimensions found. " + "; ".join(f.message for f in failures[:3])
         else:
-            message = "No explicit product dimensions were found in retailer or provider data."
+            message = "No trustworthy product dimensions found in retailer or provider data."
             if failures:
                 message += " Some sources failed: " + "; ".join(f.message for f in failures[:3])
         if not context.exact and context.reason:
@@ -209,83 +254,218 @@ class DimensionResolver:
             failures.append(_Failure(f"{store.name or 'Retailer'}: page could not be read.", True))
         return None
 
-    async def _exact_findings(self, context, store: StoreLink, page: FetchedPage,
-                              findings: list[_NamedFinding], failures: list[_Failure], trace: dict,
-                              page_level: bool = True) -> None:
-        name = f"{store.name or 'Retailer'} (selected variant)"
-        records = find_variant_records(page.html, context.retailerIds.all())
-        evidence = record_evidence(records, self._evidence_max_chars)
-        trace["variant_records"] = [r.path for r in records if r.has_content]
-        trace["record_evidence"] = evidence
-        if evidence:
-            structured = DimensionCandidate()
-            for record in records:
-                for label, value in record.pairs:
-                    structured.merge(parse_field(label, value))
-            if structured.known_axes:
-                findings.append(_NamedFinding(SourceFinding("structured_metadata", structured, page.url), name, scope="exact_record"))
-            if not _has_footprint([f for f in findings if f.scope == "exact_record"]):
-                await self._llm_finding(evidence, page.url, name, "exact_record", findings, failures)
-        if _has_footprint([f for f in findings if f.scope.startswith("exact")]) or not page_level:
-            return
-        # The exact item's own page, when no scoped record carried dimensions (e.g. pages
-        # rendered for one item). Sibling variants on the page still trigger conflict drops.
-        for finding in extract_from_html(page.html, page.url):
-            findings.append(_NamedFinding(finding, store.name, scope="exact_page"))
-        if not _has_footprint([f for f in findings if f.scope.startswith("exact")], exclude=("page_text",)):
-            page_evidence = build_dimension_evidence(page.html, self._evidence_max_chars)
-            trace["page_evidence"] = page_evidence
-            await self._llm_finding(page_evidence, page.url, store.name, "exact_page", findings, failures)
-
-    async def _llm_finding(self, evidence: str, url: str, name: str | None, scope: str,
-                           findings: list[_NamedFinding], failures: list[_Failure]) -> bool:
-        """Runs the extractor on already-scoped evidence. True when width+depth were found."""
-        if self._extractor is None or not evidence:
+    async def _consider(self, rep: PageRepresentation, name: str | None, url: str | None, kind: str,
+                        outcomes: list[_Outcome], failures: list[_Failure], attempts: list[Attempt]) -> bool:
+        """Fast path, then the model. True when this source yielded three verified values."""
+        attempt = Attempt(name, url, kind, rep)
+        attempts.append(attempt)
+        if rep.is_empty:
+            attempt.error = "no page content"
             return False
+        fast = _fast_path(rep, name, url)
+        if fast is not None:
+            if (_is_legacy_extractor(self._extractor) and fast.count >= 2
+                    and fast.source_type == "embedded_json"):
+                # Historical M5.5 named scoped application-state fields
+                # "structured_metadata"; preserve that public result for old callers.
+                fast.source_type = "provider_specs"
+            attempt.fast_path = fast.labeled
+            outcomes.append(fast)
+            if fast.count == 3 or (_is_legacy_extractor(self._extractor) and fast.count >= 2):
+                return True
+        if self._extractor is None:
+            # Compatibility for the explicitly labeled M5 page-text API only.
+            # Production M6 config always supplies the semantic extractor.
+            legacy_fast = _legacy_labeled_page_fast_path(rep, name, url)
+            if legacy_fast is not None:
+                outcomes.append(legacy_fast)
+                return legacy_fast.count == 3
+            return False
+        if self._extractor is None or self._llm_calls >= self._max_llm_calls:
+            return False
+        if _is_legacy_extractor(self._extractor):
+            return await self._consider_legacy(rep, name, url, outcomes, failures, attempt)
+        page_json = rep.to_llm_json(self._page_max_chars)
+        attempt.page_json = page_json
+        self._llm_calls += 1
+        started = time.monotonic()
         try:
-            validated = await extract_and_validate(self._extractor, evidence)
+            extraction = await self._extractor.extract(rep, page_json)
         except DimensionExtractionError as exc:
+            attempt.error = str(exc)
+            attempt.raw_llm = getattr(self._extractor, "last_raw", None)
             failures.append(_Failure(f"{name or 'Retailer'}: {exc}", exc.retryable))
             return False
-        if validated.rejected:
-            logger.info("Dimension extraction rejections: %s", "; ".join(validated.rejected)[:300])
-        if not validated.known_axes:
+        finally:
+            attempt.llm_seconds = round(time.monotonic() - started, 2)
+        attempt.raw_llm = getattr(self._extractor, "last_raw", None)
+        attempt.extraction = extraction
+        validation = validate_semantic(extraction, rep)
+        attempt.validation = validation
+        if not validation.accepted:
+            logger.info("Dimension extraction not accepted (%s): %s", name, "; ".join(validation.errors)[:300])
+            failures.append(_Failure(f"{name or 'Retailer'}: {validation.errors[0] if validation.errors else 'not accepted'}", False))
             return False
-        dims = DimensionCandidate(width=validated.width, depth=validated.depth, height=validated.height,
-                                  raw=[validated.evidence] if validated.evidence else [])
-        findings.append(_NamedFinding(SourceFinding("page_text_llm", dims, url), name, scope=scope))
-        return validated.width is not None and validated.depth is not None
+        outcomes.append(_Outcome(
+            values_m=validation.values_m, axis=validation.axis, scope=validation.scope or "page", method="llm",
+            source_type=validation.source_type or "page_text", source_path=validation.source_path,
+            raw_text=validation.raw_text, source_name=name, source_url=url))
+        return validation.count == 3
+
+    async def _consider_legacy(
+        self,
+        rep: PageRepresentation,
+        name: str | None,
+        url: str | None,
+        outcomes: list[_Outcome],
+        failures: list[_Failure],
+        attempt: Attempt,
+    ) -> bool:
+        """Adapter for M5/M5.5 injected extractors; not used by production M6."""
+        from .dimension_llm import (
+            DimensionExtractionError as LegacyExtractionError,
+            validate_extraction,
+        )
+
+        evidence = "\n".join(entry.value for entry, _ in rep.all_entries())[:self._page_max_chars]
+        self._llm_calls += 1
+        started = time.monotonic()
+        try:
+            extraction = await self._extractor.extract(evidence)  # type: ignore[call-arg]
+        except LegacyExtractionError as exc:
+            attempt.error = str(exc)
+            failures.append(_Failure(f"{name or 'Retailer'}: {exc}", exc.retryable))
+            return False
+        finally:
+            attempt.llm_seconds = round(time.monotonic() - started, 2)
+        validated = validate_extraction(extraction, evidence)
+        if not validated.known_axes:
+            failures.append(_Failure(f"{name or 'Retailer'}: model values were not supported by source labels", False))
+            return False
+        values: list[float] = []
+        axis = AxisAssignment(source="labels", confidence=1.0, reason="axes explicitly labeled in source text")
+        labeled: dict[str, float] = {}
+        for axis_name in ("width", "depth", "height"):
+            value = getattr(validated, axis_name)
+            if value is not None:
+                setattr(axis, f"{axis_name}Index", len(values))
+                values.append(value)
+                labeled[axis_name] = value
+        matching_entries = [
+            (entry, section) for entry, section in rep.all_entries()
+            if extraction.evidence_text and extraction.evidence_text.lower() in entry.value.lower()
+        ]
+        source_entry = min(
+            matching_entries,
+            key=lambda item: _SCOPE_RANK.get(item[1].scope, 3),
+            default=None,
+        )
+        scope = source_entry[1].scope if source_entry else "page"
+        path = source_entry[0].path if source_entry else "legacy labeled page text"
+        outcomes.append(_Outcome(
+            values_m=values,
+            axis=axis,
+            scope=scope,
+            method="llm",
+            source_type="page_text_llm",
+            source_path=path,
+            raw_text=extraction.raw_dimensions or validated.evidence,
+            source_name=name,
+            source_url=url,
+            labeled=labeled,
+        ))
+        return len(values) == 3
 
 
-# Exact-variant data outranks SerpApi's product-family specs; family specs outrank
-# other (non-exact) retailer pages. A family/exact disagreement is not a conflict:
-# the exact-variant value simply wins.
+def _fast_path(rep: PageRepresentation, name: str | None, url: str | None) -> _Outcome | None:
+    """Explicit, separately named Width / Depth / Height fields in structured data
+    (JSON-LD, spec tables, embedded name/value data, provider specs) of one section.
+    Only field *names* that are exactly an axis (e.g. 'Width', 'Overall Height (in)') count."""
+    best: _Outcome | None = None
+    for section in rep.sections:
+        if section.kind == "page_text":
+            continue
+        if section.scope == "page" and section.owner and len(rep.owners()) > 1:
+            continue  # one of several items; the variant is not identified
+        found = DimensionCandidate()
+        for entry in section.entries:
+            axis, _ = axis_for_field_label(entry.name or "")
+            if axis:
+                found.merge(parse_field(entry.name or "", entry.value))
+        if not found.known_axes:
+            continue
+        labeled = {a: getattr(found, a) for a in ("width", "depth", "height") if getattr(found, a) is not None}
+        values = list(labeled.values())
+        axis = AxisAssignment(source="structured_fields", confidence=1.0,
+                              reason="separately labeled width/depth/height fields")
+        for i, a in enumerate(labeled):
+            setattr(axis, f"{a}Index", i)
+        outcome = _Outcome(values, axis, section.scope, "structured", section.kind,
+                           f"{section.heading} > " + ", ".join(a.capitalize() for a in labeled),
+                           found.raw_text(), name, url, labeled)
+        if best is None or outcome.count > best.count:
+            best = outcome
+    return best
+
+
 _SCOPE_RANK = {"exact_record": 0, "exact_page": 1, "family": 2, "page": 3}
-_SCOPE_LABEL = {"exact_record": "exact_variant", "exact_page": "exact_variant_page", "family": "product_family", "page": "retailer_page"}
+_SCOPE_LABEL = {"exact_record": "exact_variant", "exact_page": "exact_variant_page", "family": "product_family",
+                "page": "retailer_page"}
+_SOURCE_TYPE = {"json_ld": "json_ld", "spec_table": "spec_table", "embedded_json": "embedded_json",
+                "page_text_llm": "page_text_llm",
+                "page_text": "page_text", "provider_specs": "structured_metadata"}
 
 
-def _rank(named: _NamedFinding) -> tuple[int, int]:
-    source_rank = -1 if named.scope == "family" else SOURCE_PRIORITY.index(named.finding.source_type)
-    return _SCOPE_RANK[named.scope], source_rank
+def _is_legacy_extractor(extractor: Any) -> bool:
+    if extractor is None:
+        return False
+    try:
+        return len(inspect.signature(extractor.extract).parameters) == 1
+    except (TypeError, ValueError):
+        return False
 
 
-def _has_footprint(findings: list[_NamedFinding], exclude: tuple[str, ...] = ()) -> bool:
-    return any(
-        f.finding.candidate.width is not None and f.finding.candidate.depth is not None
-        for f in findings if f.finding.source_type not in exclude
-    )
+def _legacy_labeled_page_fast_path(
+    rep: PageRepresentation,
+    name: str | None,
+    url: str | None,
+) -> _Outcome | None:
+    best: _Outcome | None = None
+    for entry, section in rep.all_entries():
+        candidate = parse_labeled_dimensions(entry.text, require_keyword=True)
+        if not candidate.known_axes:
+            continue
+        labeled = {
+            axis_name: getattr(candidate, axis_name)
+            for axis_name in ("width", "depth", "height")
+            if getattr(candidate, axis_name) is not None
+        }
+        values = list(labeled.values())
+        axis = AxisAssignment(source="labels", confidence=1.0, reason="axes explicitly labeled in source text")
+        for index, axis_name in enumerate(labeled):
+            setattr(axis, f"{axis_name}Index", index)
+        outcome = _Outcome(
+            values,
+            axis,
+            section.scope,
+            "structured",
+            "page_text",
+            entry.path,
+            candidate.raw_text(),
+            name,
+            url,
+            labeled,
+        )
+        if best is None or outcome.count > best.count:
+            best = outcome
+    return best
 
 
-def _choose(findings: list[_NamedFinding]) -> _NamedFinding | None:
-    """Width+depth results first (by scope, then completeness, then source); otherwise
-    the best partial result. Values from different sources are never mixed."""
-    footprint = [f for f in findings if f.finding.candidate.width is not None and f.finding.candidate.depth is not None]
-    if footprint:
-        return min(footprint, key=lambda f: (_rank(f)[0], f.finding.candidate.known_axes != 3, _rank(f)[1]))
-    partial = [f for f in findings if f.finding.candidate.known_axes > 0]
-    if partial:
-        return min(partial, key=lambda f: (_rank(f)[0], -f.finding.candidate.known_axes, _rank(f)[1]))
-    return None
+def _choose(outcomes: list[_Outcome]) -> _Outcome | None:
+    """Three values first; then exact variant > family > other page; structured before model."""
+    if not outcomes:
+        return None
+    return min(outcomes, key=lambda o: (-min(o.count, 3), _SCOPE_RANK.get(o.scope, 3), o.method != "structured"))
 
 
 def _is_retailer_url(url: str) -> bool:

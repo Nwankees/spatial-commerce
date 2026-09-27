@@ -95,7 +95,7 @@ class ProductResultsPanel(
     fun showLoading() {
         clearRows()
         headerText.text = "Finding similar products…"
-        detailText.text = "Searching real retailers for the analyzed object."
+        detailText.text = "Visual + product search using the photographed object."
         retryButton.visibility = View.GONE
         visibility = View.VISIBLE
     }
@@ -116,10 +116,15 @@ class ProductResultsPanel(
         } else {
             "${result.products.size} similar products  •  $sourceLabel"
         }
+        val modeLabel = when (result.retrievalMode) {
+            "text_visual" -> "Visual + product search"
+            "visual_only" -> "Visual search"
+            else -> "Product search"
+        }
         val lines = if (result.queries.size > 1) {
             val failed = result.queries.count { it.status == "failed" }
             mutableListOf(
-                "${result.queries.size} searches via ${result.provider}" +
+                "$modeLabel  •  ${result.queries.size} text searches via ${result.provider}" +
                     (if (failed > 0) " ($failed failed)" else "") + ", merged and ranked:",
                 result.queries.joinToString("\n") { "• “${it.query}”" },
             )

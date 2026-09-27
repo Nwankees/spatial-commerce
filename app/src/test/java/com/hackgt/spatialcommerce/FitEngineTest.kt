@@ -19,11 +19,12 @@ class FitEngineTest {
     }
 
     @Test
-    fun doesNotFitKeepsNegativeRemaining() {
+    fun doesNotFitReportsTheLeastBadRotatedOrientation() {
         val result = FitEngine.evaluate(0.97, 0.74, 0.80, 0.90)
         assertEquals(FitVerdict.DOES_NOT_FIT, result.verdict)
-        assertEquals(-0.17, result.widthRemainingMeters!!, 1e-9)
-        assertEquals(0.16, result.depthRemainingMeters!!, 1e-9)
+        assertEquals(true, result.rotatedToFit)
+        assertEquals(0.06, result.widthRemainingMeters!!, 1e-9)
+        assertEquals(-0.07, result.depthRemainingMeters!!, 1e-9)
     }
 
     @Test
@@ -43,5 +44,23 @@ class FitEngineTest {
     @Test
     fun clearanceIsAppliedWhenConfigured() {
         assertEquals(FitVerdict.DOES_NOT_FIT, FitEngine.evaluate(0.70, 0.70, 0.75, 0.90, clearanceMeters = 0.1).verdict)
+    }
+
+    @Test
+    fun footprintMayRotateNinetyDegreesToFit() {
+        val result = FitEngine.evaluate(0.80, 0.50, 0.60, 0.90)
+        assertEquals(FitVerdict.FITS, result.verdict)
+        assertEquals(true, result.rotatedToFit)
+        assertEquals(0.10, result.widthRemainingMeters!!, 1e-9)
+        assertEquals(0.10, result.depthRemainingMeters!!, 1e-9)
+    }
+
+    @Test
+    fun choosesMoreUsefulOrientationWhenNeitherFits() {
+        val result = FitEngine.evaluate(0.90, 0.60, 0.70, 0.80)
+        assertEquals(FitVerdict.DOES_NOT_FIT, result.verdict)
+        assertEquals(true, result.rotatedToFit)
+        assertEquals(0.10, result.widthRemainingMeters!!, 1e-9)
+        assertEquals(-0.10, result.depthRemainingMeters!!, 1e-9)
     }
 }

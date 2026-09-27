@@ -49,3 +49,12 @@ tmp/
 
 # Backend product-search cache (real provider results, local only)
 .cache/
+.venv/
+dimension_helper/.venv/
+
+# Generated/reconstructed 3D assets and model files never belong in Git
+*.glb
+*.gltf
+*.safetensors
+*.ckpt
+*.onnx

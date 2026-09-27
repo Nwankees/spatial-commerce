@@ -12,10 +12,21 @@ from .vision_errors import (
     VisionNotConfiguredError,
     VisionUnavailableError,
 )
-from .image_processing import InvalidImageError, prepare_image
+from .image_processing import InvalidImageError, prepare_image, prepare_search_image
 from .models import AnalyzeProductRequest, VisualProductAnalysis
 from .dimension_models import DimensionRequest, ResolvedDimensions
-from .dimension_llm import OllamaDimensionExtractor
+from fastapi.responses import FileResponse
+
+from .ar_models import ArAssetResponse, ArPreviewRequest
+from .ar_preview import ArAssetStore, ArPreviewService, DimensionLookupResult
+from .dimension_semantic import OllamaSemanticDimensionExtractor
+from .dimension_content import (
+    HelperBrowserUseProvider,
+    HelperCrawl4AIProvider,
+    PragmaticDimensionResolver,
+    SerpApiDimensionSearchProvider,
+)
+from .reconstruction import SidecarReconstructionProvider
 from .dimension_resolver import DimensionResolver, ResolutionCache
 from .page_fetcher import HttpPageFetcher
 from .product_cache import ProductSearchCache
@@ -30,6 +41,8 @@ from .product_search_service import ProductSearchFailedError, ProductSearchServi
 from .query_builder import QueryBuildError, QueryPlanner
 from .serpapi_provider import SerpApiProductSearchProvider
 from .settings import Settings, get_settings
+from .visual_reranker import OllamaCandidateVisualReranker
+from .visual_search import SerpApiGoogleLensProvider
 
 logger = logging.getLogger(__name__)
 _app_logger = logging.getLogger("app")
@@ -68,24 +81,122 @@ def get_product_cache(settings: Settings = Depends(get_settings)) -> ProductSear
     return _product_cache(settings.product_cache_path)
 
 
-def get_dimension_resolver(settings: Settings = Depends(get_settings)) -> DimensionResolver:
+def get_dimension_resolver(settings: Settings = Depends(get_settings)) -> PragmaticDimensionResolver:
+    page_fetcher = HttpPageFetcher(timeout_seconds=settings.retailer_fetch_timeout_seconds)
+    detail_source = SerpApiImmersiveProductDetailSource(
+        settings.serpapi_api_key, timeout_seconds=settings.serpapi_timeout_seconds
+    )
+    extractor = OllamaSemanticDimensionExtractor(
+        settings.ollama_base_url,
+        settings.ollama_dimension_model,
+        timeout_seconds=settings.ollama_dimension_timeout_seconds,
+        num_ctx=settings.ollama_dimension_num_ctx,
+        keep_alive=settings.ollama_keep_alive,
+    )
+    # FAST: structured/provider fields only. Do not spend model time here.
+    fast = DimensionResolver(
+        detail_source,
+        page_fetcher,
+        extractor=None,
+        page_max_chars=settings.dimension_page_max_chars,
+        max_pages=1,
+    )
+    medium = []
+    if settings.dimension_crawl_enabled:
+        medium.append(HelperCrawl4AIProvider(
+            settings.dimension_helper_url,
+            timeout_seconds=settings.dimension_crawl_timeout_seconds,
+        ))
+    if settings.dimension_web_search_enabled:
+        medium.append(SerpApiDimensionSearchProvider(
+            settings.serpapi_api_key,
+            page_fetcher,
+            timeout_seconds=settings.serpapi_timeout_seconds,
+            country=settings.serpapi_country,
+            language=settings.serpapi_language,
+        ))
+    browser = HelperBrowserUseProvider(
+        settings.dimension_helper_url,
+        timeout_seconds=settings.dimension_browser_timeout_seconds,
+    ) if settings.dimension_browser_use_enabled else None
+    return PragmaticDimensionResolver(
+        fast,
+        extractor,
+        medium,
+        browser,
+        page_max_chars=settings.dimension_page_max_chars,
+    )
+
+
+def get_legacy_dimension_resolver(settings: Settings = Depends(get_settings)) -> DimensionResolver:
+    """Old full resolver retained for scripts/regression tests, not app wiring."""
     return DimensionResolver(
         SerpApiImmersiveProductDetailSource(
             settings.serpapi_api_key, timeout_seconds=settings.serpapi_timeout_seconds
         ),
         HttpPageFetcher(timeout_seconds=settings.retailer_fetch_timeout_seconds),
-        extractor=OllamaDimensionExtractor(
+        extractor=OllamaSemanticDimensionExtractor(
             settings.ollama_base_url,
             settings.ollama_dimension_model,
             timeout_seconds=settings.ollama_dimension_timeout_seconds,
+            num_ctx=settings.ollama_dimension_num_ctx,
             keep_alive=settings.ollama_keep_alive,
         ) if settings.dimension_llm_enabled else None,
-        evidence_max_chars=settings.dimension_evidence_max_chars,
+        page_max_chars=settings.dimension_page_max_chars,
     )
 
 
 def get_resolution_cache() -> ResolutionCache:
     return _resolution_cache()
+
+
+_ar_service: ArPreviewService | None = None
+
+
+def get_ar_preview_service(settings: Settings = Depends(get_settings)) -> ArPreviewService:
+    # One long-lived instance: it owns the in-memory job registry and GPU semaphore.
+    global _ar_service
+    if _ar_service is None:
+        resolver = get_dimension_resolver(settings)
+        resolutions = _resolution_cache()
+
+        async def dimensions(product):
+            cache_started = time.perf_counter()
+            cached = resolutions.get(product.id)
+            cache_seconds = round(time.perf_counter() - cache_started, 3)
+            if cached is not None:
+                return DimensionLookupResult(
+                    cached,
+                    cache_hit=True,
+                    path="check_fit_cache",
+                    timings={"cacheLookupSeconds": cache_seconds},
+                )
+            result = await resolver.resolve(product)
+            resolutions.put(result)
+            trace = getattr(resolver, "last_trace", {})
+            resolver_timings = trace.get("timings") if isinstance(trace, dict) else None
+            timings = {"cacheLookupSeconds": cache_seconds}
+            if isinstance(resolver_timings, dict):
+                timings.update({
+                    str(key): float(value)
+                    for key, value in resolver_timings.items()
+                    if isinstance(value, (int, float))
+                })
+            winner = trace.get("winner") if isinstance(trace, dict) else None
+            return DimensionLookupResult(
+                result,
+                cache_hit=False,
+                path=str(winner or result.extractionMethod or result.sourceType or "resolver"),
+                timings=timings,
+            )
+
+        _ar_service = ArPreviewService(
+            ArAssetStore(settings.ar_asset_cache_dir),
+            SidecarReconstructionProvider(settings.reconstruction_service_url,
+                                          timeout_seconds=settings.reconstruction_timeout_seconds),
+            dimensions,
+        )
+    return _ar_service
 
 
 def get_product_search_service(
@@ -97,18 +208,41 @@ def get_product_search_service(
         country=settings.serpapi_country,
         language=settings.serpapi_language,
     )
+    valid_lens_modes = {"products", "visual_matches", "exact_matches"}
+    lens_modes = tuple(
+        mode.strip() for mode in settings.lens_modes.split(",")
+        if mode.strip() in valid_lens_modes
+    ) or ("products", "visual_matches", "exact_matches")
+    visual_provider = SerpApiGoogleLensProvider(
+        settings.serpapi_api_key,
+        timeout_seconds=settings.serpapi_timeout_seconds,
+        country=settings.serpapi_country,
+        language=settings.serpapi_language,
+        modes=lens_modes,
+        limit_per_mode=settings.product_search_results_per_query,
+    ) if settings.lens_search_enabled else None
+    visual_reranker = OllamaCandidateVisualReranker(
+        settings.ollama_base_url,
+        settings.visual_rerank_model,
+        timeout_seconds=settings.visual_rerank_timeout_seconds,
+        max_candidates=settings.visual_rerank_max_candidates,
+        num_ctx=settings.visual_rerank_num_ctx,
+        keep_alive=settings.ollama_keep_alive,
+    ) if settings.visual_rerank_enabled else None
     return ProductSearchService(
         provider,
         _product_cache(settings.product_cache_path),
         planner=QueryPlanner(max_queries=settings.product_search_max_queries),
         results_per_query=settings.product_search_results_per_query,
+        visual_provider=visual_provider,
+        visual_reranker=visual_reranker,
     )
 
 
 def create_app() -> FastAPI:
     app = FastAPI(
         title="Spatial Commerce Visual Analysis",
-        version="0.5.5",
+        version="0.6.1",
         docs_url="/docs",
         redoc_url=None,
     )
@@ -131,6 +265,16 @@ def create_app() -> FastAPI:
                 "installed": dimension.get("modelInstalled", False),
             },
             "productSearchConfigured": bool(settings.serpapi_api_key),
+            "visualSearch": {
+                "provider": "serpapi_google_lens",
+                "configured": bool(settings.serpapi_api_key) and settings.lens_search_enabled,
+                "uploadMode": "image_id",
+                "modes": list(lens_modes_from_settings(settings.lens_modes)),
+                "localReranker": settings.visual_rerank_enabled,
+                "localRerankerModel": settings.visual_rerank_model,
+                "localRerankerNumCtx": settings.visual_rerank_num_ctx,
+            },
+            "reconstruction": await SidecarReconstructionProvider(settings.reconstruction_service_url).health(),
         }
 
     @app.post("/api/v1/analyze", response_model=VisualProductAnalysis)
@@ -144,6 +288,7 @@ def create_app() -> FastAPI:
         try:
             image_bytes = prepare_image(request, settings.max_image_bytes)
             result = await service.analyze(image_bytes, request.userRequest)
+            logger.info("Visual analysis result=%s", result.model_dump_json())
             response.headers["X-Vision-Model"] = settings.ollama_model
             response.headers["X-Analysis-Duration-Ms"] = str(int((time.monotonic() - started) * 1000))
             return result
@@ -175,10 +320,14 @@ def create_app() -> FastAPI:
     @app.post("/api/v1/products/search", response_model=ProductSearchResponse)
     async def search_products(
         request: ProductSearchRequest,
+        settings: Settings = Depends(get_settings),
         service: ProductSearchService = Depends(get_product_search_service),
     ) -> ProductSearchResponse:
         try:
-            return await service.search(request.analysis, request.maxResults)
+            image_bytes = prepare_search_image(request, settings.max_image_bytes)
+            return await service.search(request.analysis, request.maxResults, image_bytes)
+        except InvalidImageError as exc:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
         except QueryBuildError as exc:
             raise HTTPException(
                 status_code=422,
@@ -221,7 +370,43 @@ def create_app() -> FastAPI:
         resolutions.put(result)
         return result
 
+    @app.post("/api/v1/products/ar-preview", response_model=ArAssetResponse)
+    async def request_ar_preview(
+        request: ArPreviewRequest,
+        cache: ProductSearchCache = Depends(get_product_cache),
+        service: ArPreviewService = Depends(get_ar_preview_service),
+    ) -> ArAssetResponse:
+        # Same trust rule as dimensions: only products this backend returned; dimensions
+        # are resolved server-side (M5), never taken from the client.
+        product = cache.find_product(request.productId)
+        if product is None or product.productUrl != request.productUrl:
+            raise HTTPException(
+                status_code=404,
+                detail="This product is no longer known to the backend. Search again and reselect it.",
+            )
+        return await service.request(product)
+
+    @app.get("/api/v1/ar-assets/{asset_id}", response_model=ArAssetResponse)
+    async def ar_asset_status(asset_id: str, service: ArPreviewService = Depends(get_ar_preview_service)) -> ArAssetResponse:
+        response = service.status(asset_id)
+        if response is None:
+            raise HTTPException(status_code=404, detail="Unknown AR asset. Request the preview again.")
+        return response
+
+    @app.get("/api/v1/ar-assets/{asset_id}/model.glb")
+    async def ar_asset_model(asset_id: str, service: ArPreviewService = Depends(get_ar_preview_service)) -> FileResponse:
+        path = service.glb_path(asset_id)
+        if path is None:
+            raise HTTPException(status_code=404, detail="AR asset not found.")
+        return FileResponse(path, media_type="model/gltf-binary", filename="model.glb")
+
     return app
+
+
+def lens_modes_from_settings(value: str) -> tuple[str, ...]:
+    valid = {"products", "visual_matches", "exact_matches"}
+    modes = tuple(mode.strip() for mode in value.split(",") if mode.strip() in valid)
+    return modes or ("products", "visual_matches", "exact_matches")
 
 
 app = create_app()

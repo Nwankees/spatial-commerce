@@ -9,6 +9,12 @@ from .models import VisualProductAnalysis
 
 DimensionsStatus = Literal["complete", "partial", "unavailable"]
 ResultSource = Literal["live", "cache"]
+RetrievalSource = Literal[
+    "text_search",
+    "lens_products",
+    "lens_visual_match",
+    "lens_exact_match",
+]
 
 
 class ProductDimensions(BaseModel):
@@ -57,7 +63,7 @@ class ProductCandidate(BaseModel):
     providerProductId: str
     position: int | None = Field(default=None, description="Provider ranking position.")
     title: str
-    price: float = Field(ge=0)
+    price: float | None = Field(default=None, ge=0)
     priceText: str | None = Field(default=None, description="Price exactly as the provider formatted it.")
     currency: str | None = Field(default=None, description="ISO 4217 code when unambiguous; otherwise null.")
     retailer: str | None = Field(default=None, description="Merchant selling the product, e.g. Wayfair.")
@@ -65,10 +71,24 @@ class ProductCandidate(BaseModel):
     productUrl: str
     rating: float | None = Field(default=None, ge=0, le=5)
     reviewCount: int | None = Field(default=None, ge=0)
+    inStock: bool | None = None
     dimensions: ProductDimensions = Field(default_factory=ProductDimensions)
     # Milestone 5.5 retrieval provenance.
     matchedQueries: list[str] = Field(default_factory=list, description="Searches that returned this product.")
     retrievalScore: float | None = Field(default=None, description="Deterministic rerank score (higher is better).")
+    # Image + text retrieval provenance. Kept in the API for diagnostics but not
+    # shown in the normal Android result cards.
+    retrievalSources: list[RetrievalSource] = Field(default_factory=list)
+    textRank: int | None = Field(default=None, ge=1)
+    visualRank: int | None = Field(default=None, ge=1)
+    visualSimilarityScore: float | None = Field(default=None, ge=0, le=1)
+    sameProductProbability: float | None = Field(default=None, ge=0, le=1)
+    visualCategoryMatch: float | None = Field(default=None, ge=0, le=1)
+    combinedScore: float | None = Field(default=None)
+    identifiers: dict[str, str] = Field(
+        default_factory=dict,
+        description="Provider-supplied GTIN/UPC/SKU/model identifiers when available.",
+    )
     # Provider reference for fetching product details later (Milestone 5).
     # Kept server-side: excluded from API responses.
     detailPageToken: str | None = Field(default=None, exclude=True, max_length=4000)
@@ -79,6 +99,9 @@ class ProductSearchRequest(BaseModel):
 
     analysis: VisualProductAnalysis
     maxResults: int = Field(default=5, ge=1, le=10)
+    imageBase64: str | None = Field(default=None, max_length=16_000_000)
+    mimeType: Literal["image/jpeg", "image/png"] = "image/jpeg"
+    rotationDegrees: Literal[0, 90, 180, 270] = 0
 
 
 QueryStatus = Literal["ok", "empty", "failed"]
@@ -106,3 +129,17 @@ class ProductSearchResponse(BaseModel):
     )
     products: list[ProductCandidate]
     message: str | None = None
+    retrievalMode: Literal["text_only", "visual_only", "text_visual"] = "text_only"
+    visualSearchStatus: Literal["ok", "empty", "failed", "skipped"] = "skipped"
+    timings: "RetrievalTimings" = Field(default_factory=lambda: RetrievalTimings())
+
+
+class RetrievalTimings(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    lensUploadMs: int | None = Field(default=None, ge=0)
+    lensSearchMs: int | None = Field(default=None, ge=0)
+    textSearchMs: int | None = Field(default=None, ge=0)
+    mergeRerankMs: int | None = Field(default=None, ge=0)
+    localVisualRerankMs: int | None = Field(default=None, ge=0)
+    totalMs: int | None = Field(default=None, ge=0)

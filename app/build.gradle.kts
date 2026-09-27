@@ -10,8 +10,8 @@ android {
         applicationId = "com.hackgt.spatialcommerce"
         minSdk = 24
         targetSdk = 37
-        versionCode = 5
-        versionName = "0.5.0"
+        versionCode = 6
+        versionName = "0.6.0"
     }
 
     compileOptions {
@@ -28,4 +28,6 @@ dependencies {
 
     // JVM unit tests for the deterministic fit engine.
     testImplementation("junit:junit:4.13.2")
+    // Real org.json for JVM unit tests of GlbParser (android.jar only has stubs).
+    testImplementation("org.json:json:20240303")
 }

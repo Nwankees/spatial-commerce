@@ -1,9 +1,9 @@
-"""Conservative parsing of explicitly stated product dimensions.
+"""Deterministic length parsing for *separately labeled* structured fields.
 
-Everything here is pure (no I/O). A value is only accepted when both its
-number and its unit are explicit (or the unit is explicitly declared by the
-surrounding label), and it is only mapped to width/depth/height when the
-source labels it as such. Anything ambiguous is rejected rather than guessed.
+Used only by the structured fast path (e.g. a JSON-LD ``width`` or a spec row named
+"Overall Width (in)"): one field, one axis, one explicit length. Deciding which page
+field states the overall dimensions is the model's job (see dimension_semantic);
+nothing here scans free text for measurement patterns.
 """
 from __future__ import annotations
 
@@ -31,12 +31,14 @@ _NUM = r"\d+(?:\.\d+)?(?:\s+\d+/\d+)?|\d+/\d+|\d*\.\d+"
 _ALPHA_UNIT = r"(?:millimet(?:er|re)s?|centimet(?:er|re)s?|met(?:er|re)s?|inch(?:es)?|feet|foot|mm|cm|in\.?|ft\.?|m)(?:(?![a-z])|(?=[wdhl]\b))"
 _SYMBOL_UNIT = r"""(?:"|”|″|''|′′)"""
 _UNIT = rf"(?:{_ALPHA_UNIT}|{_SYMBOL_UNIT})"
+# Legacy M5/M5.5 compatibility only. The active M6 resolver does not use these
+# expressions to discover evidence; page semantics are selected by Qwen and then
+# verified in dimension_semantic.py. They remain for the earlier public helpers and
+# their regression tests.
 _LABEL = r"(?:width|depth|height|length|w|d|h|l)"
 _TOKEN = rf"(?:\b{_LABEL}\b\s*[:.]?\s*)?(?:{_NUM})\s*(?:{_UNIT})?\s*(?:{_LABEL}\b\.?)?"
 _SEP = r"\s*(?:x|×|\*|by)\s*"
 _TRAILING_UNIT = r"(?:\s*\(?\s*(?:inches|inch|in\.?|cm|mm|ft|feet|meters|m)\s*\)?(?![a-z]))?"
-# Groups must not start in the middle of another number/unit (e.g. inside
-# "2 ft 6 in") and must not be followed by a fourth value, which is ambiguous.
 _TRIPLET_RE = re.compile(
     rf"(?<![\w.\"”″'′/]){_TOKEN}{_SEP}{_TOKEN}(?:{_SEP}{_TOKEN})?{_TRAILING_UNIT}(?!\s*(?:x|×|\*|by)\s*\d)",
     re.IGNORECASE,
@@ -63,11 +65,15 @@ _EXCLUDED_CONTEXT = re.compile(
     r"adjustable|mattress|screen|display|monitor|keyboard tray)\b",
     re.IGNORECASE,
 )
-_LABEL_TO_AXIS = {"w": "width", "width": "width", "d": "depth", "depth": "depth", "h": "height", "height": "height"}
 _FIELD_LABEL_RE = re.compile(
     r"^(?:overall|product|item|assembled|assembled product|outside|exterior|total|external)?\s*"
-    r"(width|depth|height)(?:\s*overall)?$"
+    r"(width|depth|length|height)(?:\s*overall)?$"
 )
+_LABEL_TO_AXIS = {
+    "w": "width", "width": "width", "d": "depth", "depth": "depth",
+    "l": "depth", "length": "depth",
+    "h": "height", "height": "height",
+}
 _DIMENSIONS_LABEL_RE = re.compile(
     r"^(?:overall|product|item|assembled|assembled product|furniture|outside|exterior)?\s*"
     r"(?:dimensions?|size|measurements?)(?:\s*overall)?$"
@@ -190,10 +196,17 @@ def axis_for_field_label(label: str) -> tuple[str | None, str | None]:
     if _EXCLUDED_CONTEXT.search(normalized):
         return None, None
     match = _FIELD_LABEL_RE.match(normalized)
-    return (match.group(1), unit_hint) if match else (None, None)
+    if not match:
+        return None, None
+    axis = "depth" if match.group(1) == "length" else match.group(1)
+    return axis, unit_hint
 
 
 def is_dimensions_label(label: str) -> bool:
+    """Legacy deterministic API retained for M5/M5.5 callers.
+
+    The active M6 path deliberately does not call this to choose LLM evidence.
+    """
     normalized, _ = normalize_label(re.sub(r"\([^)]*[x×][^)]*\)", "", label))
     return bool(_DIMENSIONS_LABEL_RE.match(normalized)) and not _EXCLUDED_CONTEXT.search(label)
 
@@ -235,13 +248,10 @@ def parse_field(label: str, value: str) -> DimensionCandidate:
 
 
 def parse_labeled_dimensions(text: str, context: str = "", require_keyword: bool = False) -> DimensionCandidate:
-    """Finds explicit W/D/H dimension groups such as '30" W x 28" D x 35" H'.
+    """Legacy M5 parser for explicitly axis-labeled W/D/H groups.
 
-    Each number must be labeled W/D/H itself, or the context must declare the
-    order explicitly (e.g. 'Dimensions (W x D x H)'). Unlabeled groups, groups
-    using 'L', and package/seat/etc. contexts are rejected. With
-    ``require_keyword`` (free page text) a dimensions keyword must appear just
-    before the group, so unrelated text such as 'fits 12" W laptops' is ignored.
+    This is retained so earlier milestone APIs and tests keep working. The active
+    M6 semantic pipeline never calls it to preselect what Qwen is allowed to see.
     """
     result = DimensionCandidate()
     if not text or (context and _EXCLUDED_CONTEXT.search(context)):
@@ -250,7 +260,7 @@ def parse_labeled_dimensions(text: str, context: str = "", require_keyword: bool
     for match in _TRIPLET_RE.finditer(text):
         before = text[max(0, match.start() - 50): match.start()]
         if _CONTINUES_MEASUREMENT_RE.search(before):
-            continue  # e.g. the '6 in W' inside '2 ft 6 in W': never parse a fragment.
+            continue
         if _EXCLUDED_CONTEXT.search(before):
             continue
         if require_keyword and not _PAGE_TEXT_KEYWORD_RE.search(before[-40:]):
@@ -287,7 +297,7 @@ def _parse_group(group_text: str, context: str) -> DimensionCandidate | None:
     for unit_match in _CONTEXT_UNIT_RE.finditer(context):
         context_unit = unit_match.group(1) or unit_match.group(2)
 
-    labels = [(t.group("pre") or t.group("post") or "").lower() for t in tokens]
+    labels = [(token.group("pre") or token.group("post") or "").lower() for token in tokens]
     if all(labels):
         axes = [_LABEL_TO_AXIS.get(label) for label in labels]
     elif not any(labels):
@@ -303,7 +313,7 @@ def _parse_group(group_text: str, context: str) -> DimensionCandidate | None:
     else:
         return None
     if None in axes or len(set(axes)) != len(axes):
-        return None  # 'L' labels, repeated labels, or mixed schemes are ambiguous.
+        return None
 
     candidate = DimensionCandidate()
     for token, axis in zip(tokens, axes):
@@ -311,7 +321,7 @@ def _parse_group(group_text: str, context: str) -> DimensionCandidate | None:
         number = parse_number(token.group("num"))
         factor = unit_to_meters(unit)
         if number is None or factor is None:
-            return None  # A number without an explicit unit is not trustworthy.
+            return None
         meters = _in_range(number * factor)
         if meters is None:
             return None

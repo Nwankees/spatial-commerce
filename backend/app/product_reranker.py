@@ -33,6 +33,15 @@ class RerankWeights:
     product_type: float = 1.5       # × share of category/subcategory terms in the title
     identity_text: float = 1.5      # × share of model-family/visible-text terms in the title
     features: float = 1.0           # × share of color/material/feature terms in the title
+    lens_exact: float = 2.4         # exact visual match, rank-decayed
+    lens_product: float = 1.6       # purchasable Lens result, rank-decayed
+    lens_visual: float = 1.2        # appearance-based Lens result, rank-decayed
+    cross_generator: float = 1.2    # result independently found by text and Lens
+    multi_lens_mode: float = 0.4    # per additional Lens mode (capped)
+    purchasable: float = 0.3        # provider supplied a price
+    local_same_product: float = 2.4
+    local_visual_similarity: float = 2.4
+    local_category_match: float = 0.8
     min_brand_confidence: float = 0.5
     max_multi_query_bonus: int = 2
 
@@ -42,6 +51,12 @@ class ScoredCandidate:
     candidate: ProductCandidate
     best_position: int
     queries: list[str]
+    retrieval_sources: list[str] = field(default_factory=list)
+    text_rank: int | None = None
+    visual_rank: int | None = None
+    same_product_probability: float | None = None
+    visual_similarity: float | None = None
+    visual_category_match: float | None = None
     score: float = 0.0
     breakdown: dict[str, float] = field(default_factory=dict)
 
@@ -84,6 +99,28 @@ class ProductReranker:
             " ".join(analysis.distinctiveFeatures)
         )
         parts["features"] = w.features * _share(descriptive, title)
+
+        sources = set(item.retrieval_sources)
+        lens_ranks = max(0.0, 1.0 - ((item.visual_rank or self._depth) - 1) / self._depth)
+        if "lens_exact_match" in sources:
+            parts["lens_exact"] = w.lens_exact * lens_ranks
+        if "lens_products" in sources:
+            parts["lens_product"] = w.lens_product * lens_ranks
+        if "lens_visual_match" in sources:
+            parts["lens_visual"] = w.lens_visual * lens_ranks
+        lens_sources = sources & {"lens_exact_match", "lens_products", "lens_visual_match"}
+        if "text_search" in sources and lens_sources:
+            parts["cross_generator"] = w.cross_generator
+        if len(lens_sources) > 1:
+            parts["multi_lens_mode"] = w.multi_lens_mode * min(2, len(lens_sources) - 1)
+        if item.candidate.price is not None or item.candidate.inStock is True:
+            parts["purchasable"] = w.purchasable
+        if item.same_product_probability is not None:
+            parts["local_same_product"] = w.local_same_product * item.same_product_probability
+        if item.visual_similarity is not None:
+            parts["local_visual_similarity"] = w.local_visual_similarity * item.visual_similarity
+        if item.visual_category_match is not None:
+            parts["local_category_match"] = w.local_category_match * item.visual_category_match
 
         item.breakdown = {k: round(v, 4) for k, v in parts.items() if v}
         item.score = round(sum(parts.values()), 4)

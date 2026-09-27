@@ -55,9 +55,76 @@ After a successful analysis, a separate **Find similar products** action sends t
 
 The Android app shows the results in a scrollable panel above the lower overlay, with thumbnails (loaded with Coil), title, price, retailer, and rating. Tapping a result selects it and keeps it in app state for later milestones. The AR preview still renders only the locally authored Lighthouse chair; retrieved products are not rendered in AR.
 
+## Milestone 6: real-product AR preview
+
+"View in my space" shows the selected real product in AR: its product image is turned into a
+textured 3D model by Stable Fast 3D (SF3D, open source, running locally on the GPU), normalized,
+scaled to the product's **verified retailer measurements** and placed on a detected floor or tabletop.
+
+The generated geometry is a visual approximation, not CAD truth. Physical size never comes from the
+mesh: the backend only scales to three measurements from its own verified dimension record. Source labels,
+an exact labeled duplicate, or—when the result is unambiguous—mesh proportions assign those values to
+width/depth/height. Without all three, or when an unlabeled set cannot be mapped safely, the app reports
+that real-scale preview is unavailable. A selected real product is never replaced by the built-in chair.
+
+### Architecture
+
+```
+Android (ArPreviewClient)
+  POST /api/v1/products/ar-preview {productId, productUrl}
+    -> product registry lookup (selected result only) -> three verified measurements (M5 resolver, cached)
+    -> safe image download (public http(s) only, redirects re-checked, 12 MB, decoded + size-checked)
+    -> cache key sha256(product id + URL, selected-image hash, verified-dimension identity/version,
+       provider/version, normalization version)
+    -> ready (cache hit) | generating (job) | unavailable | failed
+  GET  /api/v1/ar-assets/{assetId}            poll status (32-hex ids only)
+  GET  /api/v1/ar-assets/{assetId}/model.glb  normalized GLB (ready assets only)
+Backend ArPreviewService
+  ReconstructionProvider (SidecarReconstructionProvider -> reconstruction_service, SF3D)
+  -> load exactly one mesh -> validate -> normalize (center XZ, floor at y=0, footprint yaw
+     straightened, bounds recorded) -> GLB -> re-validate -> atomic save in .cache/ar-assets/<id>/
+  -> labeled axes directly, otherwise score every source-compatible W/D/H permutation against mesh
+     aspect ratios; reject poor or ambiguous matches
+  -> scale per axis = verified retailer meters / normalized extent
+Android GlbParser -> TexturedMeshRenderer (OpenGL ES 2.0, existing ARCore renderer)
+  model = anchor * yaw(measured-edge alignment + fit rotation + user ±15°, +90° if mesh axes swapped)
+          * scale(x, y, z)
+```
+
+Failures are never cached (a failed product is retried after 20 s); successful assets are reused
+across requests and restarts. Only generated asset ids are served; ids that are not 32 lowercase hex
+characters, unknown ids and anything outside the asset store return 404. Model weights, generated
+meshes, downloaded images and caches are git-ignored and never committed.
+
+Setup of the SF3D sidecar (Python 3.11 env, weights on D:, Hugging Face license) is in
+[reconstruction_service/README.md](reconstruction_service/README.md).
+
+### Known limitations
+
+- The only image used is the selected search result's image; retailer thumbnails can be low
+  resolution or show a styled scene, which lowers reconstruction quality.
+- SF3D reconstructs the unseen back side; it is plausible, not measured.
+- Per-axis scaling can stretch the mesh when its proportions disagree with the verified box; the
+  distortion is recorded as `maxAxisDistortion`.
+- First generation of a product takes tens of seconds (model warm-up plus CPU texture baking);
+  cached assets load in about a second.
+
+### Manual test procedure
+
+1. Start Ollama, the backend and `reconstruction_service\run_service.ps1`; `adb reverse tcp:8000 tcp:8000`.
+2. Analyze an object, find products, select one, Check fit.
+3. Tap **Measure space**, tap A and B for the first footprint edge, then press either endpoint and
+   drag across the horizontal surface to set breadth. Confirm the translucent rectangle and four corners.
+4. With three verified measurements, tap **View in my space**; the product should appear automatically
+   centered in the rectangle. The fill disappears while the outline remains. Without a rectangle, the app
+   tries a tracked plane near screen center and falls back to tap placement when no confident point exists.
+5. Rotate with ±15°, tap another surface to move the product and outline together, then Reset to clear both.
+6. Compare with a tape measure against the verified dimensions shown in the info panel.
+7. Select a product without verified height: the preview must be unavailable, with no chair.
+
 ## Milestone 5.5: local vision + multi-query retrieval
 
-Gemini is no longer on the active path. `/api/v1/analyze` now calls a **local Ollama vision model** (default `qwen3-vl:30b`), and product search runs **several searches per object** and merges them.
+Gemini is no longer on the active path. `/api/v1/analyze` now calls a **local Ollama vision model** (default `qwen3-vl:8b` for demo latency), and product search runs **several searches per object** and merges them.
 
 ### Local vision architecture
 
@@ -70,7 +137,7 @@ Android → FastAPI `/api/v1/analyze` → `OllamaVisionService` → Ollama `POST
 
 Ollama unreachable, model not installed, timeouts, malformed JSON and schema mismatches all become retryable 502/504 errors. `/health` reports whether Ollama is reachable and whether the configured model is installed. Each analysis logs model, outcome, duration and Ollama's own timings; the response carries `X-Vision-Model` and `X-Analysis-Duration-Ms` headers. There is no automatic fallback to Gemini.
 
-Required setup: install Ollama, `ollama pull qwen3-vl:30b` (or set `OLLAMA_MODEL=qwen3-vl:8b` for lower latency; no code change), and keep Ollama running. Environment variables: `OLLAMA_BASE_URL`, `OLLAMA_MODEL`, `OLLAMA_TIMEOUT_SECONDS` (180), `OLLAMA_KEEP_ALIVE`, `VISION_MIN_CONFIDENCE`, `PRODUCT_SEARCH_MAX_QUERIES` (3), `PRODUCT_SEARCH_RESULTS_PER_QUERY` (10).
+Required setup: install Ollama, `ollama pull qwen3-vl:8b` (the larger `qwen3-vl:30b` remains an optional accuracy/latency tradeoff), and keep Ollama running. Environment variables: `OLLAMA_BASE_URL`, `OLLAMA_MODEL`, `OLLAMA_TIMEOUT_SECONDS` (180), `OLLAMA_KEEP_ALIVE`, `VISION_MIN_CONFIDENCE`, `PRODUCT_SEARCH_MAX_QUERIES` (3), `PRODUCT_SEARCH_RESULTS_PER_QUERY` (10).
 
 ### Richer analysis contract
 
@@ -80,15 +147,17 @@ Required setup: install Ollama, `ollama pull qwen3-vl:30b` (or set `OLLAMA_MODEL
 
 `QueryPlanner` takes the model's queries (most specific first) plus the deterministic Milestone 4 query as a fallback, removes near-duplicates, and caps the list (`PRODUCT_SEARCH_MAX_QUERIES`, default 3). The searches run concurrently through the existing `ProductSearchProvider` (SerpApi). Results are merged and deduplicated by provider product ID, product URL, and normalized title + retailer, keeping each product's best-ranked occurrence and recording every query that returned it (`matchedQueries`).
 
-`ProductReranker` then scores each candidate with explicit, testable terms: provider rank, extra queries that also found it, the most specific query, brand match (× brand confidence, only at ≥ 0.5), product-type term overlap, model-family/visible-text overlap, and color/material/feature overlap. The top five by score are returned with `retrievalScore`. If some searches fail, the others' results are returned with a note. If all fail, cached results are returned (the same query set first, otherwise individually cached queries), clearly labeled as cached; otherwise a retryable error. **Image-similarity reranking is not implemented yet.**
+`ProductReranker` scores each candidate with explicit, testable terms: provider rank, extra queries, brand/type/identity/feature agreement, Lens exact/product/visual rank, agreement across text and Lens, and purchasability. The same photographed ARCore frame is uploaded directly to SerpApi's Image API (maximum 500 KB prepared copy) and its short-lived `image_id` drives concurrent Google Lens `products`, `visual_matches`, and `exact_matches` searches—no public image hosting. Results are deduplicated by canonical retailer URL, provider/merchant/global identifiers, Google offer identity, and normalized title + source.
+
+The top merged shortlist (default 5—the same number the UI can display) is compared in one local `qwen3-vl` batch call against the original photo. Structured exact-product, visual-similarity, and category-match scores augment the deterministic ranking. Candidate-image download or local-model failure is fail-open: Lens/text results remain usable. Text and Lens candidate generation also degrade independently. Responses keep `retrievalSources`, text/visual ranks, local similarity, `combinedScore`, and a latency breakdown for debugging; the Android cards only show the final products and a compact “Visual + product search” status.
 
 Milestone 5 compatibility: merged products keep their SerpApi product ID, detail token (server-side), links, retailer, price and image, and are recorded in the product cache, so **Check fit** works on them unchanged.
 
 ### Known limitations
 
-- `qwen3-vl:30b` may not fit fully in GPU memory; first analysis after a model load can take minutes. The phone waits up to 190 s.
-- Reranking is term-based: listings with sparse or generic titles can rank lower than they deserve.
-- Up to 3 SerpApi searches per **Find similar products** (plus one detail call per **Check fit**).
+- A cold local model load is slower than later requests. The 8B demo default avoids the multi-minute 30B path on the event laptop.
+- Candidate images that are unavailable or block backend downloads keep their Lens/text score but skip local visual comparison.
+- A visual search uses one SerpApi image upload plus up to three concurrent Lens modes, alongside up to 3 Google Shopping searches (and one detail call per **Check fit**).
 
 ### Manual test procedure
 
@@ -111,37 +180,26 @@ Selected real product → trustworthy product dimensions → measured available 
   - `dimension_extraction` parses each page into per-source findings; `dimension_parsing` holds the pure, conservative parsing and unit rules.
 - Android adds **Measure space** mode, a **Check fit** action on the selected product, a `FitPanel`, and the pure `FitEngine`.
 
-### Dimension resolution update: retailer text extraction
+### Dimension resolution update: structured page semantics
 
-Physical testing found retailer pages (e.g. Target) that state dimensions as `Dimensions (Overall): 39.4 inches (H) x 21.65 inches (W) x 22 inches (D)`. The deterministic parser did not recognize parenthesized `(H)`/`(W)`/`(D)` labels or the `Dimensions (Overall)` label, and on such pages the text is often only inside embedded page data (scripts), which it never read. Instead of adding more retailer-specific regexes, the resolver now has an extraction step backed by a small local text model plus deterministic validation.
+The active M6 pipeline is retailer page → generic structured page representation → `qwen3:4b-instruct` semantic source selection → deterministic provenance validation → meter normalization. It does not use regular expressions to decide which page fields the model may see.
 
-Hierarchy (highest first; sources are never mixed):
+`page_representation.py` preserves the page title, selected variant/options, product JSON-LD, embedded product/application JSON, specification tables, `<dl>` name/value pairs, headings with their following content, and compact visible text blocks. It removes navigation, footer, cookie/consent UI, advertisements, recommendations, reviews, Q&A, tracking/media blobs and other obvious noise. Each retained entry has a stable ID, source type, human-readable path, scope and owning item ID. Exact retailer identity is applied before model extraction, so sibling variants are not mixed into the selected item's evidence.
 
-1. Provider product-detail structured specs (SerpApi Immersive Product `about_the_product` fields). If they give width and depth, no retailer page is fetched.
-2. Retailer JSON-LD.
-3. Retailer structured metadata (microdata) and specification tables.
-4. Cleaned retailer spec/page text → local LLM extraction (`OLLAMA_DIMENSION_MODEL`, default `qwen3:4b-instruct`) → deterministic validation. Only runs when 1–3 lack width and depth. Source type `page_text_llm`, shown in the app as "retailer specifications".
-5. Deterministic labeled page-text parsing (legacy fallback).
-6. Unavailable (with `retryable` when a timeout/network/model error was involved).
+Resolution order, without mixing values between sources:
 
-Page preprocessing (`dimension_evidence.py`, generic, not retailer-specific): product JSON-LD (name, width/depth/height/size/additionalProperty, dimension sentences from the description), spec-table rows and `<dl>` pairs with dimension keywords, visible text lines with dimension keywords plus the next line, and keyword windows from embedded page scripts (JS string escapes and tags removed). Navigation, header/footer, forms, cookie/consent banners and review/Q&A sections are skipped; duplicates are removed; the result is capped at `DIMENSION_EVIDENCE_MAX_CHARS` (6000).
+1. Fetch and scope the exact selected variant's retailer page when its identity is known.
+2. Use a no-model fast path only when one structured section explicitly names Width, Depth and Height.
+3. Otherwise give the compact structured representation to `qwen3:4b-instruct` with a strict JSON response schema.
+4. Deterministically verify that every cited entry was actually shown to the model, every value and unit occurs there, the cited sources belong to one compatible section/variant, and any axis mapping is supported by source labels.
+5. Convert the verified source values to meters in code. Unlabeled triples such as `13.39 x 4.13 x 4.13 in` remain verified in source order with unresolved axis indices; they are not discarded.
+6. If the exact page does not resolve, apply the same representation/model/validation pipeline to provider family specs and then other retailer pages.
 
-**The model is an extractor, not a source of truth.** The prompt forbids using titles, product type, images, typical sizes or world knowledge; requires explicit W/D/H labels or an explicitly declared order; rejects unlabeled triples and `L x W x H`; excludes package and part dimensions; and asks for numbers copied verbatim with their unit plus the verbatim evidence text. The request is text only with `stream: false`, `think: false`, `temperature: 0`, and a JSON schema `format`.
+The prompt forbids invented or estimated values, package/shipping dimensions, and seat/arm/back/shelf/interior or other component measurements. Multiple plausible overall sets return uncertain rather than being guessed. The model identifies meaning; software establishes provenance. Regex is used only after the model chooses evidence, for exact number/unit/axis verification and deterministic conversion.
 
-Deterministic post-validation (`validate_extraction`), per claimed axis:
+Setup: `ollama pull qwen3:4b-instruct`. Env: `OLLAMA_DIMENSION_MODEL`, `OLLAMA_DIMENSION_TIMEOUT_SECONDS`, `OLLAMA_DIMENSION_NUM_CTX`, `DIMENSION_LLM_ENABLED`, and `DIMENSION_PAGE_MAX_CHARS`. `/health` reports `dimensionModel.installed`. Only successful results are cached. Run `backend/scripts/dimension_debug.py` to print the selected variant, full structured model input, raw Qwen output, provenance validation, normalized dimensions, axis mapping, and fit/M6 eligibility.
 
-- the evidence text must be verbatim source text (otherwise the whole source is searched instead of trusting it);
-- the exact number must occur in the source, each occurrence used for at most one axis;
-- the unit right after that number (or the group's trailing unit) must equal the claimed unit (mm, cm, m, in/″/inches, ft/feet);
-- the number's own segment must carry exactly the claimed axis label (`W`, `(W)`, `Width`, `wide`, …) and no other, or the source must declare the order (`(W x D x H)`, never with `L`) and the number's position must match;
-- package/shipping/box/seat/arm/leg/shelf/drawer/interior contexts are rejected, as are non-positive and implausible (outside 0.01–10 m) values;
-- meters are computed in code. The model's own `status` is ignored except that `unavailable` stays unavailable.
-- if the same labeled statement appears elsewhere in the source with a different value for that axis (e.g. several product variants each listing `Dimensions (Overall)` with different widths), that axis is dropped rather than picking one;
-- if the first pass quoted a real statement but some axes failed validation, one second pass is run on just that quoted statement; the pass with more validated axes is kept (passes are never merged).
-
-Setup: `ollama pull qwen3:4b-instruct`. Env: `OLLAMA_DIMENSION_MODEL`, `OLLAMA_DIMENSION_TIMEOUT_SECONDS` (60), `DIMENSION_LLM_ENABLED`, `DIMENSION_EVIDENCE_MAX_CHARS`. `/health` reports `dimensionModel.installed`. Only resolved (verified/partial) results are cached in memory, so installing the model or a transient failure is re-checked on the next **Check fit**.
-
-Known retailer limitations: no browser automation, so pages that block plain requests (HTTP 403, e.g. west elm/Staples) or render specs only with client-side JavaScript that is not in the server HTML still end up unavailable; `L x W x H` listings (common on Walmart) remain deliberately unresolved.
+Known retailer limitations: no browser automation is used, so pages that block plain requests or omit product data from server HTML remain unavailable. An unlabeled triple can be trusted as measurements but cannot be assigned to width/depth/height until M6 compares its proportions with the generated mesh; ambiguous or poor matches remain unavailable instead of being guessed.
 
 ### Selected-variant matching
 
@@ -156,41 +214,42 @@ Identity is `exact_item` (retailer item/SKU/variant ID), `exact_offer` (offer ID
 
 Policy:
 
-1. **Exact identity**: the selected offer's page is fetched and its embedded data (JSON in `<script>` tags) is searched for the object whose identifier key (`tcin`, `usItemId`, `sku`, `variantId`, `id`, …) *exactly* equals the retailer ID (`variant_scope.py`). Only that object's content is used; nested objects with a different ID (sibling variants), AI-generated summaries, reviews, media and package/shipping data are skipped. Labeled name/value specs there are parsed deterministically; otherwise the scoped text goes to the local extraction model and deterministic validation. If no scoped record has dimensions, the exact item's page is used (sibling conflicts still drop axes).
+1. **Exact identity**: the selected offer's page is fetched and embedded product data is scoped to the object whose identifier key (`tcin`, `usItemId`, `sku`, `variantId`, `id`, …) *exactly* equals the retailer ID. Sibling records are excluded before the structured representation is given to the model. Explicit separate W/D/H fields can use the fast path; every other label/value shape is interpreted by the local model and then provenance-validated.
 2. **Options only**: options scope a record only if they match exactly one item ID in the retailer's own data; zero or several matches leave the variant unresolved.
-3. Exact-variant results outrank SerpApi family specs; a disagreement between them is not treated as a conflict. Without exact identity (or when the exact page has no width+depth), SerpApi family specs remain first, as before.
+3. A complete exact-variant result wins immediately and is never mixed with family data. If the exact page has no complete three-value result, the resolver may fall back to a complete product-family source rather than combine partial values.
 
 `ResolvedDimensions` now includes `variantScope` (`exact_variant`, `exact_variant_page`, `product_family`, `retailer_page`) and `variantIdentity`. Search deduplication no longer merges two results with the same title and retailer when their Google offer IDs (`headlineOfferDocid`) differ, so variants are not merged. AI-generated retailer summaries (e.g. `genAi…Summary`) are excluded from all dimension evidence.
 
 ### Dimension trust rules
 
-- Values are only taken from explicit source data, in the priority order listed above (updated: provider product-detail specs now rank first, and LLM extraction with deterministic validation sits before the legacy page-text parser).
-- A source stating all three axes wins by priority; otherwise the highest-priority source stating both width and depth; otherwise any partial source. Values from different sources are never mixed.
-- Never used: images, category averages, Gemini, product titles, untyped JSON embedded in page scripts (it often describes related products).
+- Values are only taken from explicit source data. Exact selected-variant evidence outranks product-family or generic retailer-page evidence; values from different sources are never mixed.
+- A three-value overall measurement wins over a partial result at the same trust level. Unlabeled triples remain verified measurements with unresolved axes.
+- Never used as measurement truth: images, mesh size, category averages, Gemini, product titles, or model world knowledge. Embedded JSON is usable only through the scoped structured representation and the same provenance rules.
 - A number needs an explicit unit (mm, cm, m, in/″, ft, UN/CEFACT `MMT`/`CMT`/`MTR`/`INH`/`FOT`) or a unit declared by its label, e.g. `Width (in)`. Bare numbers are rejected.
-- Axes are mapped only from explicit labels: `Width`/`Overall Width`/…, `W`/`D`/`H` letters on each value, or an order declared in the label such as `Dimensions (W x D x H)`. Unlabeled `30 x 28 x 35 in`, any `L x W x H` order, a fourth value, fragments like the `6 in` in `2 ft 6 in`, and package/shipping/box/seat/arm/leg/interior/adjustable contexts are rejected. Two different values for the same axis in one source drop that axis.
+- Source axes are mapped only from explicit labels: `Width`/`Overall Width`/…, `W`/`D`/`H` letters on each value, or a declared order such as `Dimensions (W x D x H)`. Unlabeled three-value measurements are retained with null indices. During M6 only, mesh proportions may infer their axis permutation when one mapping is clearly better; the physical meter values still come exclusively from the retailer. Ambiguous or badly mismatched meshes are rejected.
 - Values outside 0.01–10 m are rejected as misparses.
 
 ### Dimension provenance model
 
-`ResolvedDimensions`: `widthMeters`, `depthMeters`, `heightMeters` (null when not explicitly stated), `status` (`verified` = all three stated, `partial` = some stated, `unavailable`), `sourceType` (`json_ld`, `structured_metadata`, `spec_table`, `page_text`, `unavailable`), `sourceUrl`, `sourceName`, `rawDimensions` (the text the values were parsed from), `retryable`, and `message`. Timeouts, network errors, provider failures, and HTTP 429/5xx are retryable; blocked pages (401/403), non-HTML, and pages without dimensions are definitive `unavailable`. Definitive results are cached in memory for an hour to spare provider calls.
+`ResolvedDimensions` includes `dimensionsMeters` in source order, an explicit `axisMapping`, separately populated `widthMeters`/`depthMeters`/`heightMeters` only when the source labels those axes, `status`, source type/name/URL/path, raw evidence, extraction method, variant scope/identity, retryability and failure message. `verified` means three product measurements are provenance-verified; it does not imply their axes were labeled.
 
 ### Fit formula
 
 ```
-fits ⇔ productWidth + clearance ≤ availableWidth  AND  productDepth + clearance ≤ availableDepth
+fits ⇔ (productWidth ≤ availableWidth AND productDepth ≤ availableDepth)
+    OR (productDepth ≤ availableWidth AND productWidth ≤ availableDepth)
 widthRemaining = availableWidth − productWidth − clearance   (not clamped; negative = over)
 depthRemaining = availableDepth − productDepth − clearance
 ```
 
-Milestone 5 uses `clearance = 0` (exact footprint) and compares the product in its stated orientation. Missing product width or depth → `UNKNOWN`; missing available width or depth → `NEEDS_MEASUREMENT`. No LLM participates.
+The app evaluates both 0° and 90° footprint orientations and reports when rotation is required. Missing or unresolved product width/depth → `UNKNOWN`; missing available width/depth → `NEEDS_MEASUREMENT`. No LLM participates in the fit calculation.
 
 ### Manual test procedure
 
 1. Start the backend and `adb reverse tcp:8000 tcp:8000`; launch the app.
 2. Analyze a real object, tap **Find similar products**, select a result, tap **Check fit**.
 3. Confirm the panel shows either product dimensions with their source, or **UNKNOWN — dimensions unavailable** with a reason (never invented values).
-4. Tap **Measure space**: tap the left then right edge of the available width, then the front then back edge of the available depth. Confirm `Available width` / `Available depth` readouts.
+4. Tap **Measure space**: tap A and B for the first footprint edge, then drag from either endpoint across the surface to set breadth. Confirm the rectangle and two footprint readouts.
 5. Confirm **FITS** / **DOES NOT FIT** with per-axis spare or excess, then **Reset** and confirm the measurements clear and the result returns to **NEEDS MEASUREMENT**.
 
 ### Milestone 5 and 5.5 physical verification

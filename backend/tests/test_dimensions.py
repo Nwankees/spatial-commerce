@@ -81,7 +81,6 @@ def test_declared_order_in_label_is_used() -> None:
     ("label", "value"),
     [
         ("Dimensions", "30 x 28 x 35 in"),                                   # unlabeled order
-        ("Assembled Product Dimensions (L x W x H)", "28.70 x 25.20 x 38.20 in"),  # L is ambiguous
         ("Package Dimensions", '30" W x 28" D x 35" H'),                    # not the product
         ("Seat Width", "22 in"),                                             # a part, not overall
         ("Length", '38"L (Package Dimensions)'),
@@ -92,6 +91,13 @@ def test_declared_order_in_label_is_used() -> None:
 )
 def test_ambiguous_or_non_footprint_values_are_rejected(label: str, value: str) -> None:
     assert parse_field(label, value).known_axes == 0
+
+
+def test_retailer_length_is_the_second_footprint_axis() -> None:
+    dimensions = parse_field("Assembled Product Dimensions (L x W x H)", "28.70 x 25.20 x 38.20 in")
+    assert (dimensions.width, dimensions.depth, dimensions.height) == pytest.approx(
+        (25.20 * IN, 28.70 * IN, 38.20 * IN), abs=0.0001
+    )
 
 
 def test_page_text_requires_dimension_keyword_and_rejects_fragments() -> None:

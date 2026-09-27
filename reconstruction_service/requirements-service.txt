@@ -1,0 +1,4 @@
+# Installed into the isolated SF3D environment on top of SF3D's own requirements.
+fastapi>=0.115,<1
+uvicorn>=0.30,<1
+python-multipart>=0.0.9

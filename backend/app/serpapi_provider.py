@@ -170,6 +170,7 @@ class SerpApiProductSearchProvider:
                 productUrl=product_url,
                 rating=rating if rating is not None and 0 <= rating <= 5 else None,
                 reviewCount=int(reviews) if reviews is not None and reviews >= 0 else None,
+                inStock=raw.get("in_stock") if isinstance(raw.get("in_stock"), bool) else None,
                 detailPageToken=_text(raw.get("immersive_product_page_token")),
                 # Google Shopping search results carry no structured physical
                 # dimensions, so they are reported as unavailable, never estimated.

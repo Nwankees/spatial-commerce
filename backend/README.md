@@ -11,7 +11,7 @@ python -m venv .venv
 .venv\Scripts\python -m pip install -r requirements-dev.txt
 Copy-Item .env.example .env
 # Put the SerpApi key in .env (never commit this file). Vision runs locally in Ollama:
-#   ollama pull qwen3-vl:30b   (OLLAMA_MODEL / OLLAMA_BASE_URL are configurable)
+#   ollama pull qwen3-vl:8b   (OLLAMA_MODEL / OLLAMA_BASE_URL are configurable)
 .venv\Scripts\python -m uvicorn app.main:app --host 127.0.0.1 --port 8000
 ```
 
@@ -29,15 +29,38 @@ The debug Android app then reaches the service at `http://127.0.0.1:8000` throug
 
 ## Dimension extraction model
 
-Retailer-page dimension extraction uses a second, text-only Ollama model: `ollama pull qwen3:4b-instruct` (`OLLAMA_DIMENSION_MODEL`). It only runs when structured sources lack width and depth; its output is validated deterministically against the page text before use (see the main README). Test a page with `.venv\Scripts\python ..\tmp\m5_5_dimension_check.py <retailer URL>`.
+Retailer-page dimension extraction uses a second, text-only Ollama model: `ollama pull qwen3:4b-instruct` (`OLLAMA_DIMENSION_MODEL`). A generic parser preserves product JSON-LD, embedded product/application data, spec tables, name/value lists, headings and visible product text while removing obvious page noise. Explicit separate Width/Depth/Height fields use a deterministic fast path; otherwise Qwen selects the overall-product evidence from that structured representation. Code then verifies every cited entry, value, unit and variant scope before normalizing to meters. Unlabeled triples remain verified in source order instead of being discarded.
+
+For a verbose live trace from `backend/`, run:
+
+```powershell
+.venv\Scripts\python scripts\dimension_debug.py --url "https://retailer.example/product/..." --title "Selected product" --retailer "Retailer"
+```
+
+Add `--html ..\tmp\saved-page.html` to use a captured fixture without refetching. The script prints the selected variant, exact model input, raw result, source path, deterministic validation, normalized values, axis mapping, and fit/M6 eligibility.
 
 ## Product search
 
-`POST /api/v1/products/search` accepts `{"analysis": <VisualProductAnalysis>, "maxResults": 5}` and returns the query used, the provider (`serpapi`), `resultSource` (`live` or `cache`), `cachedAt`, and normalized `ProductCandidate` results from SerpApi Google Shopping. It requires `SERPAPI_API_KEY`; `/health` reports `productSearchConfigured`. Successful live results are cached in `.cache/product_search_cache.json` and are only served, clearly labeled as cached, when a later live search for the same query fails.
+`POST /api/v1/products/search` accepts the validated `analysis`, the same `imageBase64`/rotation used for analysis, and `maxResults`. Text queries run through SerpApi Google Shopping while the photographed object is uploaded directly to SerpApi's Image API and searched through Google Lens `products`, `visual_matches`, and `exact_matches`; the image never needs a public URL. Results are deduplicated and reranked together, with bounded one-candidate-at-a-time local Qwen3-VL comparisons over the top-three shortlist. Either retrieval path can fail independently. `SERPAPI_API_KEY` stays server-side; `LENS_SEARCH_ENABLED`, `LENS_MODES`, `VISUAL_RERANK_ENABLED`, and `VISUAL_RERANK_MAX_CANDIDATES` tune the feature. Successful live results are cached in `.cache/product_search_cache.json` for dimension/AR handoff and failure fallback.
 
 ## Product dimensions
 
-`POST /api/v1/products/dimensions` accepts `{"productId", "productUrl"}` for a product previously returned by product search and returns `ResolvedDimensions` (meters, `verified`/`partial`/`unavailable`, source type, source URL/name, raw text, `retryable`). It uses SerpApi's Google Immersive Product API (same `SERPAPI_API_KEY`) plus plain HTTP fetches of up to two retailer pages (`RETAILER_FETCH_TIMEOUT_SECONDS`, default 8). Dimensions are never estimated; see the main README for the trust rules.
+`POST /api/v1/products/dimensions` accepts `{"productId", "productUrl"}` for a product previously returned by product search and returns `ResolvedDimensions` (source-order meters, axis mapping, `verified`/`partial`/`unavailable`, source path/provenance, variant scope, and retry state). It uses SerpApi's Google Immersive Product API (same `SERPAPI_API_KEY`) plus plain HTTP fetches of up to two retailer pages (`RETAILER_FETCH_TIMEOUT_SECONDS`, default 8). Dimensions are never estimated; see the main README for the trust rules.
+
+## AR preview (Milestone 6)
+
+`POST /api/v1/products/ar-preview`, `GET /api/v1/ar-assets/{id}` and
+`GET /api/v1/ar-assets/{id}/model.glb` turn a selected product's image into a normalized GLB via the
+SF3D sidecar (`RECONSTRUCTION_SERVICE_URL`, default `http://127.0.0.1:8010`; see
+`../reconstruction_service/README.md`). Assets are cached in `AR_ASSET_CACHE_DIR`
+(default `.cache/ar-assets`, git-ignored). The cache identity includes the selected product/URL,
+image hash, verified-dimension identity, reconstruction provider/version, and normalization version.
+Dimensions already resolved by Check Fit are reused rather than sending Browser Use or another slow
+fallback through the preview path. Responses expose compact dimension, download, cache, SF3D,
+normalization, write, and total timing fields plus a `hit`/`miss`/`joined` cache outcome. Scaling uses
+only verified retailer measurements. If the retailer supplies an unlabeled triple, the generated mesh
+may assign its W/D/H permutation from shape proportions, but it never supplies or changes the physical
+meter values; ambiguous mappings are rejected.
 
 ## Tests
 

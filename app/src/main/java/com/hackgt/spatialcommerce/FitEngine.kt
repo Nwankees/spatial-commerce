@@ -19,15 +19,15 @@ data class FitResult(
     val widthRemainingMeters: Double?,
     val depthRemainingMeters: Double?,
     val clearanceMeters: Double,
+    /** True when swapping the two horizontal product axes is the fitting orientation. */
+    val rotatedToFit: Boolean,
 )
 
 /**
  * Deterministic footprint check. No estimation, no defaults for missing values.
  *
- * fits  <=>  productWidth + clearance <= availableWidth  AND  productDepth + clearance <= availableDepth
- *
- * Milestone 5 uses clearance = 0 (exact footprint comparison). The product is
- * compared in its stated orientation only (width against width, depth against depth).
+ * A footprint may rotate on the floor, so both A×B and B×A are checked. Milestone 5
+ * uses clearance = 0 (exact footprint comparison).
  */
 object FitEngine {
     fun evaluate(
@@ -41,14 +41,26 @@ object FitEngine {
         val verdict: FitVerdict
         var widthRemaining: Double? = null
         var depthRemaining: Double? = null
+        var rotated = false
         if (productWidthMeters == null || productDepthMeters == null) {
             verdict = FitVerdict.UNKNOWN
         } else if (availableWidthMeters == null || availableDepthMeters == null) {
             verdict = FitVerdict.NEEDS_MEASUREMENT
         } else {
-            widthRemaining = availableWidthMeters - productWidthMeters - clearanceMeters
-            depthRemaining = availableDepthMeters - productDepthMeters - clearanceMeters
-            verdict = if (widthRemaining >= 0.0 && depthRemaining >= 0.0) FitVerdict.FITS else FitVerdict.DOES_NOT_FIT
+            val directWidth = availableWidthMeters - productWidthMeters - clearanceMeters
+            val directDepth = availableDepthMeters - productDepthMeters - clearanceMeters
+            val rotatedWidth = availableWidthMeters - productDepthMeters - clearanceMeters
+            val rotatedDepth = availableDepthMeters - productWidthMeters - clearanceMeters
+            val directFits = directWidth >= 0.0 && directDepth >= 0.0
+            val rotatedFits = rotatedWidth >= 0.0 && rotatedDepth >= 0.0
+            rotated = !directFits && rotatedFits
+            if (!directFits && !rotatedFits) {
+                // Report the less-bad orientation so the shortfall is useful.
+                rotated = minOf(rotatedWidth, rotatedDepth) > minOf(directWidth, directDepth)
+            }
+            widthRemaining = if (rotated) rotatedWidth else directWidth
+            depthRemaining = if (rotated) rotatedDepth else directDepth
+            verdict = if (directFits || rotatedFits) FitVerdict.FITS else FitVerdict.DOES_NOT_FIT
         }
         return FitResult(
             verdict = verdict,
@@ -59,6 +71,7 @@ object FitEngine {
             widthRemainingMeters = widthRemaining,
             depthRemainingMeters = depthRemaining,
             clearanceMeters = clearanceMeters,
+            rotatedToFit = rotated,
         )
     }
 }

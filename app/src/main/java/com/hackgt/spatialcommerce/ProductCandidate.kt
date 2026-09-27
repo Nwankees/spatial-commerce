@@ -18,7 +18,7 @@ data class ProductCandidate(
     val provider: String,
     val providerProductId: String,
     val title: String,
-    val price: Double,
+    val price: Double?,
     val priceText: String?,
     val currency: String?,
     val retailer: String?,
@@ -26,10 +26,18 @@ data class ProductCandidate(
     val productUrl: String,
     val rating: Double?,
     val reviewCount: Int?,
+    val inStock: Boolean? = null,
     val dimensions: ProductDimensions,
+    val retrievalSources: List<String> = emptyList(),
+    val textRank: Int? = null,
+    val visualRank: Int? = null,
+    val visualSimilarityScore: Double? = null,
+    val combinedScore: Double? = null,
+    val identifiers: Map<String, String> = emptyMap(),
 ) {
     fun displayPrice(): String = priceText
-        ?: String.format(Locale.US, "%.2f%s", price, currency?.let { " $it" }.orEmpty())
+        ?: price?.let { String.format(Locale.US, "%.2f%s", it, currency?.let { code -> " $code" }.orEmpty()) }
+        ?: "Price unavailable"
 
     fun displayRetailerAndRating(): String {
         val parts = mutableListOf(retailer ?: "Retailer unavailable")
@@ -51,9 +59,21 @@ data class ProductSearchResult(
     val message: String?,
     /** Every search the backend ran for this request (Milestone 5.5 multi-query retrieval). */
     val queries: List<QueryOutcome> = emptyList(),
+    val retrievalMode: String = "text_only",
+    val visualSearchStatus: String = "skipped",
+    val timings: RetrievalTimings = RetrievalTimings(),
 ) {
     val isCached: Boolean get() = resultSource == "cache"
 }
+
+data class RetrievalTimings(
+    val lensUploadMs: Int? = null,
+    val lensSearchMs: Int? = null,
+    val textSearchMs: Int? = null,
+    val mergeRerankMs: Int? = null,
+    val localVisualRerankMs: Int? = null,
+    val totalMs: Int? = null,
+)
 
 data class QueryOutcome(
     val query: String,
@@ -68,6 +88,9 @@ data class ResolvedDimensions(
     val widthMeters: Double?,
     val depthMeters: Double?,
     val heightMeters: Double?,
+    /** All retailer-verified values in source order, even when W/D/H order is unresolved. */
+    val dimensionsMeters: List<Double>,
+    val axisMapping: DimensionAxisMapping?,
     /** "verified", "partial", or "unavailable". */
     val status: String,
     /** "json_ld", "structured_metadata", "spec_table", "page_text", or "unavailable". */
@@ -75,6 +98,19 @@ data class ResolvedDimensions(
     val sourceUrl: String?,
     val sourceName: String?,
     val rawDimensions: String?,
+    val sourcePath: String?,
+    val extractionMethod: String?,
+    val variantScope: String?,
     val retryable: Boolean,
     val message: String?,
+)
+
+data class DimensionAxisMapping(
+    val widthIndex: Int?,
+    val depthIndex: Int?,
+    val heightIndex: Int?,
+    val confidence: Double,
+    val reason: String?,
+    /** structured_fields | labels | none */
+    val source: String,
 )

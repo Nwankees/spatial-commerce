@@ -327,7 +327,7 @@ class ProductRenderer(private val boxRenderer: BoxRenderer) {
     }
 }
 
-private fun createProgram(vertexSource: String, fragmentSource: String): Int {
+internal fun createProgram(vertexSource: String, fragmentSource: String): Int {
     val vertexShader = compileShader(GLES20.GL_VERTEX_SHADER, vertexSource)
     val fragmentShader = compileShader(GLES20.GL_FRAGMENT_SHADER, fragmentSource)
     return GLES20.glCreateProgram().also { program ->
