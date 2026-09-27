@@ -9,6 +9,7 @@ from .models import (
     IntegrationWriteResponse,
     MemoryItem,
     MemorySearchResponse,
+    PurchaseIntentRecord,
     SavedProductRecord,
     UserSessionRecord,
     VoiceResponse,
@@ -71,6 +72,17 @@ class SponsorIntegrationService:
 
     async def fit_history(self, session_id: str, limit: int) -> list[FitHistoryRecord]:
         return await self.persistence.fit_history(session_id, limit)
+
+    async def save_purchase(self, record: PurchaseIntentRecord) -> IntegrationWriteResponse:
+        await self.persistence.save_purchase(record)
+        return IntegrationWriteResponse(
+            accepted=True,
+            provider=self.persistence.name,
+            persistedRemotely=self.persistence.last_write_remote,
+        )
+
+    async def recent_purchases(self, session_id: str, limit: int) -> list[PurchaseIntentRecord]:
+        return await self.persistence.recent_purchases(session_id, limit)
 
     async def remember(self, session_id: str, content: str, kind: str) -> IntegrationWriteResponse:
         await self.memory.remember(session_id, content, kind)

@@ -51,7 +51,7 @@ class ConversationService:
         session = self._store.create()
         return CreateConversationResponse(
             sessionId=session.id,
-            message="Ask me to find, refine, compare, check fit, or preview a product.",
+            message="Ask me to find, refine, compare, check fit, preview, or prepare a product purchase.",
             state=ConversationStateView.from_session(session),
         )
 
@@ -161,6 +161,9 @@ class ConversationService:
                     searchResult=outcome.searchResult,
                     selectedProduct=outcome.selectedProduct,
                     fit=outcome.fit,
+                    purchase=outcome.purchase,
+                    trustVerification=outcome.trustVerification,
+                    checkoutUrl=outcome.checkoutUrl,
                     uiDirective=outcome.uiDirective,
                     state=ConversationStateView.from_session(state),
                 )

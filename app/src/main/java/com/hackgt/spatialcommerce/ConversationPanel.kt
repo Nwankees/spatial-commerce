@@ -26,6 +26,8 @@ class ConversationPanel(
     private val sendButton: Button
     private val progress: TextView
     private val voiceButton: Button
+    private val purchaseReview: LinearLayout
+    private val purchaseText: TextView
     private var voiceEnabled = false
 
     init {
@@ -70,6 +72,34 @@ class ConversationPanel(
             visibility = View.GONE
         }
         addView(progress)
+
+        purchaseText = TextView(context).apply {
+            setTextColor(Color.WHITE)
+            textSize = 14f
+            setPadding(dp(10), dp(8), dp(10), dp(8))
+        }
+        val confirmPurchase = Button(context).apply {
+            text = "Confirm"
+            isAllCaps = false
+            setOnClickListener { sendPreset("Yes, confirm this purchase.") }
+        }
+        val cancelPurchase = Button(context).apply {
+            text = "Cancel"
+            isAllCaps = false
+            setOnClickListener { sendPreset("Cancel this purchase.") }
+        }
+        purchaseReview = LinearLayout(context).apply {
+            orientation = VERTICAL
+            setBackgroundColor(Color.rgb(36, 40, 50))
+            visibility = View.GONE
+            addView(purchaseText, LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT))
+            addView(LinearLayout(context).apply {
+                orientation = HORIZONTAL
+                addView(confirmPurchase, LayoutParams(0, dp(44), 1f))
+                addView(cancelPurchase, LayoutParams(0, dp(44), 1f).apply { marginStart = dp(8) })
+            })
+        }
+        addView(purchaseReview, LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT))
 
         voiceButton = Button(context).apply {
             text = "Voice: Off"
@@ -139,6 +169,25 @@ class ConversationPanel(
         input.requestFocus()
     }
 
+    fun showPurchase(purchase: PurchaseReview?) {
+        if (purchase == null) {
+            purchaseReview.visibility = View.GONE
+            return
+        }
+        val variant = purchase.variant?.let { "\nVariant: $it" }.orEmpty()
+        val fit = purchase.fitStatus?.let { "\nFit: ${it.replace('_', ' ')}" }.orEmpty()
+        val trust = if (purchase.trustedAgentStatus == "verified_demo_key") {
+            "\nTrusted Agent: TAP signature verified (demo key)"
+        } else ""
+        val simulation = if (purchase.status == "COMPLETED_SIMULATED") "\nHackathon simulation — no real payment." else ""
+        purchaseText.text = "${purchase.title}\nMerchant: ${purchase.merchant}$variant" +
+            "\nQuantity: ${purchase.quantity}\nTotal: %.2f %s".format(purchase.total, purchase.currency) +
+            "$fit\nStatus: ${purchase.status.replace('_', ' ')}$trust$simulation"
+        purchaseReview.visibility = View.VISIBLE
+        purchaseReview.getChildAt(1).visibility =
+            if (purchase.status == "AWAITING_CONFIRMATION") View.VISIBLE else View.GONE
+    }
+
     fun showError(message: String) {
         progress.visibility = View.GONE
         sendButton.isEnabled = true
@@ -152,6 +201,13 @@ class ConversationPanel(
         val message = input.text.toString().trim()
         if (message.isEmpty() || !sendButton.isEnabled) return
         input.setText("")
+        append("You", message)
+        showWorking()
+        onSend(message)
+    }
+
+    private fun sendPreset(message: String) {
+        if (!sendButton.isEnabled) return
         append("You", message)
         showWorking()
         onSend(message)

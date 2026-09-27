@@ -47,6 +47,24 @@ class FitHistoryRecord(BaseModel):
     checkedAt: datetime = Field(default_factory=_utc_now)
 
 
+class PurchaseIntentRecord(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    sessionId: str = Field(min_length=1, max_length=120)
+    intentId: str = Field(min_length=1, max_length=200)
+    productId: str = Field(min_length=1, max_length=300)
+    merchant: str = Field(min_length=1, max_length=160)
+    merchantUrl: str = Field(min_length=1, max_length=4000)
+    amount: float = Field(ge=0)
+    currency: str = Field(min_length=1, max_length=8)
+    quantity: int = Field(ge=1, le=10)
+    status: str = Field(min_length=1, max_length=40)
+    trustedAgentStatus: str = Field(min_length=1, max_length=80)
+    commerceProvider: str = Field(min_length=1, max_length=120)
+    isSimulation: bool = True
+    updatedAt: datetime = Field(default_factory=_utc_now)
+
+
 class MemoryWriteRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 

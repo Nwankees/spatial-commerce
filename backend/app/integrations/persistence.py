@@ -6,7 +6,7 @@ from collections import defaultdict
 from typing import Any
 
 from .contracts import PersistenceProvider
-from .models import FitHistoryRecord, SavedProductRecord, UserSessionRecord
+from .models import FitHistoryRecord, PurchaseIntentRecord, SavedProductRecord, UserSessionRecord
 
 logger = logging.getLogger("app.integrations.persistence")
 
@@ -21,6 +21,7 @@ class InMemoryPersistenceProvider:
         self._sessions: dict[str, UserSessionRecord] = {}
         self._products: dict[str, dict[str, SavedProductRecord]] = defaultdict(dict)
         self._fits: dict[str, list[FitHistoryRecord]] = defaultdict(list)
+        self._purchases: dict[str, dict[str, PurchaseIntentRecord]] = defaultdict(dict)
 
     async def save_session(self, record: UserSessionRecord) -> None:
         self._sessions[record.sessionId] = record.model_copy(deep=True)
@@ -45,6 +46,13 @@ class InMemoryPersistenceProvider:
 
     async def fit_history(self, session_id: str, limit: int = 10) -> list[FitHistoryRecord]:
         return [item.model_copy(deep=True) for item in reversed(self._fits.get(session_id, []))][:limit]
+
+    async def save_purchase(self, record: PurchaseIntentRecord) -> None:
+        self._purchases[record.sessionId][record.intentId] = record.model_copy(deep=True)
+
+    async def recent_purchases(self, session_id: str, limit: int = 10) -> list[PurchaseIntentRecord]:
+        values = sorted(self._purchases.get(session_id, {}).values(), key=lambda item: item.updatedAt, reverse=True)
+        return [item.model_copy(deep=True) for item in values[:limit]]
 
 
 class MongoPersistenceProvider:
@@ -127,6 +135,23 @@ class MongoPersistenceProvider:
 
         return [FitHistoryRecord.model_validate(item) for item in await asyncio.to_thread(load)]
 
+    async def save_purchase(self, record: PurchaseIntentRecord) -> None:
+        await asyncio.to_thread(
+            self._db.purchase_intents.replace_one,
+            {"sessionId": record.sessionId, "intentId": record.intentId},
+            record.model_dump(mode="python"),
+            upsert=True,
+        )
+
+    async def recent_purchases(self, session_id: str, limit: int = 10) -> list[PurchaseIntentRecord]:
+        def load() -> list[dict[str, Any]]:
+            return list(
+                self._db.purchase_intents.find({"sessionId": session_id}, {"_id": 0})
+                .sort("updatedAt", -1)
+                .limit(limit)
+            )
+        return [PurchaseIntentRecord.model_validate(item) for item in await asyncio.to_thread(load)]
+
 
 class FailOpenPersistenceProvider:
     """Uses Atlas when healthy and transparently retains data in memory otherwise."""
@@ -181,4 +206,11 @@ class FailOpenPersistenceProvider:
 
     async def fit_history(self, session_id: str, limit: int = 10) -> list[FitHistoryRecord]:
         result = await self._read("fit_history", session_id, limit)
+        return list(result) if isinstance(result, list) else []
+
+    async def save_purchase(self, record: PurchaseIntentRecord) -> None:
+        await self._write("save_purchase", record)
+
+    async def recent_purchases(self, session_id: str, limit: int = 10) -> list[PurchaseIntentRecord]:
+        result = await self._read("recent_purchases", session_id, limit)
         return list(result) if isinstance(result, list) else []

@@ -63,6 +63,7 @@ class ConversationStore:
             session.latestResults = list(context.products or [])
             if session.result_ids() != previous_ids:
                 session.latestSearch = None
+                self._cancel_pending_purchase(session)
             valid_ids = set(session.result_ids())
             if session.selectedProductId not in valid_ids:
                 session.selectedProductId = None
@@ -70,10 +71,18 @@ class ConversationStore:
             selected = context.selectedProductId
             if selected is not None and selected not in set(session.result_ids()):
                 raise ValueError("Selected product is not in the current result list.")
+            if selected != session.selectedProductId:
+                self._cancel_pending_purchase(session)
             session.selectedProductId = selected
         if "measuredSpace" in supplied:
             session.measuredSpace = context.measuredSpace
         return session
+
+    @staticmethod
+    def _cancel_pending_purchase(session: ConversationSession) -> None:
+        if session.pendingPurchase is not None and session.pendingPurchase.status == "AWAITING_CONFIRMATION":
+            session.lastPurchase = session.pendingPurchase.model_copy(update={"status": "CANCELLED"})
+            session.pendingPurchase = None
 
     def reset(self, session_id: str) -> ConversationSession:
         current = self.get(session_id)

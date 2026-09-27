@@ -30,9 +30,27 @@ data class ConversationProgress(val phase: String, val action: String?) {
         action == "check_fit" -> "Checking fit…"
         action == "request_ar_preview" -> "Preparing the 3D preview…"
         action == "compare_products" -> "Comparing products…"
+        action == "prepare_purchase" -> "Preparing a safe purchase review…"
+        action == "confirm_purchase" -> "Verifying trusted-agent checkout…"
         else -> "Working on your request…"
     }
 }
+
+data class PurchaseReview(
+    val id: String,
+    val title: String,
+    val merchant: String,
+    val price: Double,
+    val currency: String,
+    val quantity: Int,
+    val total: Double,
+    val variant: String?,
+    val fitStatus: String?,
+    val status: String,
+    val trustedAgentStatus: String,
+    val isSimulation: Boolean,
+    val checkoutUrl: String,
+)
 
 data class ConversationReply(
     val message: String,
@@ -44,6 +62,8 @@ data class ConversationReply(
     val selectedProduct: ProductCandidate?,
     val selectedProductId: String?,
     val uiDirective: String,
+    val purchase: PurchaseReview?,
+    val checkoutUrl: String?,
 )
 
 /** USB-local M7 API client. Secrets and the local model remain on the backend. */
@@ -222,6 +242,34 @@ class ConversationClient(
             selectedProduct = selected,
             selectedProductId = state.optionalString("selectedProductId"),
             uiDirective = json.optString("uiDirective", "none"),
+            purchase = (json.optJSONObject("purchase") ?: state.optJSONObject("purchase"))?.let(::parsePurchase),
+            checkoutUrl = json.optionalString("checkoutUrl"),
+        )
+    }
+
+    private fun parsePurchase(json: JSONObject): PurchaseReview {
+        val variants = json.optJSONObject("selectedVariant")
+        val variantText = variants?.let { value ->
+            buildList {
+                value.keys().forEach { key ->
+                    value.optString(key).trim().takeIf { it.isNotEmpty() }?.let { add("$key: $it") }
+                }
+            }.joinToString(", ").ifBlank { null }
+        }
+        return PurchaseReview(
+            id = json.getString("id"),
+            title = json.getString("title"),
+            merchant = json.getString("merchant"),
+            price = json.getDouble("price"),
+            currency = json.getString("currency"),
+            quantity = json.getInt("quantity"),
+            total = json.getDouble("total"),
+            variant = variantText,
+            fitStatus = json.optionalString("fitStatus"),
+            status = json.getString("status"),
+            trustedAgentStatus = json.getString("trustedAgentStatus"),
+            isSimulation = json.optBoolean("isSimulation", true),
+            checkoutUrl = json.getString("checkoutUrl"),
         )
     }
 

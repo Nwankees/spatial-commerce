@@ -7,10 +7,15 @@ from .conversation_models import (
     AgentAction,
     CheckFitAction,
     CompareProductsAction,
+    ConfirmPurchaseAction,
+    CancelPurchaseAction,
     ConversationSession,
     FindSimilarAction,
     FitAssessment,
     GetProductDetailsAction,
+    GetPurchaseStatusAction,
+    OpenCheckoutAction,
+    PreparePurchaseAction,
     ProductReferenceArgs,
     RefineSearchAction,
     RequestArPreviewAction,
@@ -18,6 +23,7 @@ from .conversation_models import (
     SelectProductAction,
     ToolOutcome,
 )
+from .commerce_service import CommerceService
 from .dimension_models import ResolvedDimensions
 from .models import VisualProductAnalysis
 from .product_models import ProductCandidate, ProductSearchResponse
@@ -65,13 +71,33 @@ class ShoppingToolExecutor:
         dimensions: DimensionGateway,
         ar_preview: ArPreviewGateway | None = None,
         product_lookup: Callable[[str], ProductCandidate | None] | None = None,
+        commerce: CommerceService | None = None,
     ) -> None:
         self._search = search
         self._dimensions = dimensions
         self._ar = ar_preview or UnavailableArPreviewGateway()
         self._lookup = product_lookup
+        self._commerce = commerce
 
     async def execute(self, action: AgentAction, state: ConversationSession) -> ToolOutcome:
+        if self._commerce is not None:
+            if isinstance(action, PreparePurchaseAction):
+                return self._commerce.prepare(state, action.arguments, action.arguments.quantity)
+            if isinstance(action, ConfirmPurchaseAction):
+                return await self._commerce.confirm(
+                    state,
+                    action.arguments.intentId,
+                    action.arguments.confirmationReference,
+                )
+            if isinstance(action, CancelPurchaseAction):
+                return self._commerce.cancel(state)
+            if isinstance(action, GetPurchaseStatusAction):
+                return self._commerce.status(state)
+            if isinstance(action, OpenCheckoutAction):
+                return self._commerce.open_checkout(state)
+            # A changed selection/search context makes an old "yes" unsafe.
+            if isinstance(action, (FindSimilarAction, RefineSearchAction, SelectProductAction)):
+                self._commerce.invalidate_pending(state)
         if isinstance(action, FindSimilarAction):
             return await self._find(action, state)
         if isinstance(action, RefineSearchAction):

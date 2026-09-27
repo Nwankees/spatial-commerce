@@ -7,6 +7,7 @@ from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, field_validator
 
 from .models import VisualProductAnalysis
 from .product_models import ProductCandidate, ProductSearchResponse
+from .commerce_models import PurchaseIntent, TrustVerification
 
 
 ConversationActionName = Literal[
@@ -17,6 +18,11 @@ ConversationActionName = Literal[
     "request_ar_preview",
     "get_product_details",
     "compare_products",
+    "prepare_purchase",
+    "confirm_purchase",
+    "cancel_purchase",
+    "get_purchase_status",
+    "open_checkout",
     "reset_session",
     "clarify",
 ]
@@ -98,6 +104,8 @@ class ConversationSession(BaseModel):
     measuredSpace: MeasuredSpace | None = None
     latestFit: FitAssessment | None = None
     latestArPreviewProductId: str | None = None
+    pendingPurchase: PurchaseIntent | None = None
+    lastPurchase: PurchaseIntent | None = None
     # Backboard recall is planner-only context. It is deliberately excluded
     # from API serialization and is never treated as an instruction.
     rememberedPreferences: list[str] = Field(
@@ -129,6 +137,7 @@ class ConversationStateView(BaseModel):
     measuredSpace: MeasuredSpace | None = None
     latestFit: FitAssessment | None = None
     latestArPreviewProductId: str | None = None
+    purchase: PurchaseIntent | None = None
     activePhase: Literal["planning", "executing", "responding"] | None = None
     activeAction: ConversationActionName | None = None
 
@@ -144,6 +153,7 @@ class ConversationStateView(BaseModel):
             measuredSpace=session.measuredSpace,
             latestFit=session.latestFit,
             latestArPreviewProductId=session.latestArPreviewProductId,
+            purchase=session.pendingPurchase or session.lastPurchase,
             activePhase=session.activePhase,
             activeAction=session.activeAction,
         )
@@ -222,6 +232,17 @@ class CompareProductsArgs(BaseModel):
     resultNumbers: list[int] = Field(default_factory=list, max_length=10)
 
 
+class PreparePurchaseArgs(ProductReferenceArgs):
+    quantity: int = Field(default=1, ge=1, le=10)
+
+
+class ConfirmPurchaseArgs(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    intentId: str | None = Field(default=None, max_length=200)
+    confirmationReference: str | None = Field(default=None, max_length=200)
+
+
 class ClarifyArgs(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -274,6 +295,36 @@ class CompareProductsAction(BaseModel):
     arguments: CompareProductsArgs = Field(default_factory=CompareProductsArgs)
 
 
+class PreparePurchaseAction(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    action: Literal["prepare_purchase"]
+    arguments: PreparePurchaseArgs = Field(default_factory=PreparePurchaseArgs)
+
+
+class ConfirmPurchaseAction(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    action: Literal["confirm_purchase"]
+    arguments: ConfirmPurchaseArgs = Field(default_factory=ConfirmPurchaseArgs)
+
+
+class CancelPurchaseAction(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    action: Literal["cancel_purchase"]
+    arguments: EmptyArgs = Field(default_factory=EmptyArgs)
+
+
+class GetPurchaseStatusAction(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    action: Literal["get_purchase_status"]
+    arguments: EmptyArgs = Field(default_factory=EmptyArgs)
+
+
+class OpenCheckoutAction(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    action: Literal["open_checkout"]
+    arguments: EmptyArgs = Field(default_factory=EmptyArgs)
+
+
 class ResetSessionAction(BaseModel):
     model_config = ConfigDict(extra="forbid")
     action: Literal["reset_session"]
@@ -295,6 +346,11 @@ AgentAction = Annotated[
         RequestArPreviewAction,
         GetProductDetailsAction,
         CompareProductsAction,
+        PreparePurchaseAction,
+        ConfirmPurchaseAction,
+        CancelPurchaseAction,
+        GetPurchaseStatusAction,
+        OpenCheckoutAction,
         ResetSessionAction,
         ClarifyAction,
     ],
@@ -312,9 +368,13 @@ class ToolOutcome(BaseModel):
     searchResult: ProductSearchResponse | None = None
     selectedProduct: ProductCandidate | None = None
     fit: FitAssessment | None = None
+    purchase: PurchaseIntent | None = None
+    trustVerification: TrustVerification | None = None
+    checkoutUrl: str | None = None
     uiDirective: Literal[
         "none", "analyze_object", "show_products", "select_product",
-        "measure_space", "show_fit", "enter_ar_preview",
+        "measure_space", "show_fit", "enter_ar_preview", "review_purchase",
+        "purchase_complete", "open_checkout",
     ] = "none"
 
 
@@ -331,6 +391,9 @@ class ConversationTurnResponse(BaseModel):
     searchResult: ProductSearchResponse | None = None
     selectedProduct: ProductCandidate | None = None
     fit: FitAssessment | None = None
+    purchase: PurchaseIntent | None = None
+    trustVerification: TrustVerification | None = None
+    checkoutUrl: str | None = None
     uiDirective: str = "none"
     state: ConversationStateView
 

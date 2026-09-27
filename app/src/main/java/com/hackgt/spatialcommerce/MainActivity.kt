@@ -519,6 +519,7 @@ class MainActivity : Activity() {
 
     private fun applyConversationReply(reply: ConversationReply) {
         conversationPanel.showReply(reply.message)
+        conversationPanel.showPurchase(reply.purchase)
         if (conversationPanel.isVoiceEnabled()) {
             sponsorVoiceClient.speak(reply.message) { reason ->
                 if (conversationPanel.isVoiceEnabled()) {
@@ -577,6 +578,13 @@ class MainActivity : Activity() {
             "enter_ar_preview" -> {
                 conversationPanel.close()
                 beginConversationArPreview(selected ?: selectedProduct)
+            }
+            "open_checkout" -> {
+                val url = reply.checkoutUrl ?: reply.purchase?.checkoutUrl
+                if (url != null) {
+                    runCatching { startActivity(android.content.Intent(android.content.Intent.ACTION_VIEW, android.net.Uri.parse(url))) }
+                        .onFailure { Toast.makeText(this, "Could not open the merchant page.", Toast.LENGTH_SHORT).show() }
+                }
             }
             else -> statusText.text = reply.message
         }

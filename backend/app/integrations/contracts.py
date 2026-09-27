@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Protocol
 
-from .models import FitHistoryRecord, MemoryItem, SavedProductRecord, UserSessionRecord
+from .models import FitHistoryRecord, MemoryItem, PurchaseIntentRecord, SavedProductRecord, UserSessionRecord
 
 
 class PersistenceProvider(Protocol):
@@ -21,6 +21,10 @@ class PersistenceProvider(Protocol):
     async def save_fit(self, record: FitHistoryRecord) -> None: ...
 
     async def fit_history(self, session_id: str, limit: int = 10) -> list[FitHistoryRecord]: ...
+
+    async def save_purchase(self, record: PurchaseIntentRecord) -> None: ...
+
+    async def recent_purchases(self, session_id: str, limit: int = 10) -> list[PurchaseIntentRecord]: ...
 
 
 class MemoryProvider(Protocol):

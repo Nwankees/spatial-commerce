@@ -14,11 +14,17 @@ from .conversation_models import (
     ClarifyArgs,
     CompareProductsAction,
     CompareProductsArgs,
+    ConfirmPurchaseAction,
+    ConfirmPurchaseArgs,
     ConversationSession,
     EmptyArgs,
     FindSimilarAction,
     FindSimilarArgs,
     GetProductDetailsAction,
+    GetPurchaseStatusAction,
+    OpenCheckoutAction,
+    PreparePurchaseAction,
+    PreparePurchaseArgs,
     ProductReferenceArgs,
     RefineSearchAction,
     RefineSearchArgs,
@@ -27,6 +33,7 @@ from .conversation_models import (
     SearchConstraints,
     SelectProductAction,
     ToolOutcome,
+    CancelPurchaseAction,
 )
 
 
@@ -66,6 +73,16 @@ Rules:
 - "in my room/space" uses request_ar_preview.
 - Use compare_products for "which is smaller/cheaper" comparisons.
 - "Go back to the first one" uses select_product.
+- "Buy/order/get this" uses prepare_purchase. It only creates a review; it never completes a purchase.
+- "Get two" uses prepare_purchase for the selected/pending product with quantity 2, replacing the old review safely.
+- An explicit yes/confirm/proceed after a pending purchase review uses confirm_purchase.
+- confirm_purchase is ONLY for an explicit authorization word/phrase. A request that changes color,
+  variant, quantity, result, merchant, or price is never confirmation even when a purchase is pending.
+- "Use the black one" is refine_search (or select_product when it clearly names a displayed result),
+  and must invalidate the old purchase review rather than confirm it.
+- Cancel/stop a pending purchase uses cancel_purchase. Asking its progress uses get_purchase_status.
+- "Open the merchant/retailer page" uses open_checkout.
+- A generic "yes" is confirm_purchase only when pendingPurchase is awaiting confirmation; otherwise clarify.
 - Use clarify only when the shopping intent truly cannot be routed.
 """
 
@@ -75,6 +92,8 @@ class _ActionChoice(BaseModel):
     action: Literal[
         "find_similar_products", "refine_search", "select_product", "check_fit",
         "request_ar_preview", "get_product_details", "compare_products",
+        "prepare_purchase", "confirm_purchase", "cancel_purchase",
+        "get_purchase_status", "open_checkout",
         "reset_session", "clarify",
     ]
 
@@ -104,6 +123,16 @@ class _RefineDecision(BaseModel):
 class _CompareDecision(BaseModel):
     model_config = ConfigDict(extra="forbid")
     resultNumbers: list[int] = Field(default_factory=list, max_length=10)
+
+
+class _QuantityDecision(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    quantity: int = Field(
+        default=1,
+        ge=1,
+        le=10,
+        description="Cardinal count being purchased, never the ordinal position of a search result.",
+    )
 
 
 class _ClarifyDecision(BaseModel):
@@ -142,6 +171,18 @@ class OllamaConversationPlanner:
             "measuredSpace": state.measuredSpace.model_dump(mode="json") if state.measuredSpace else None,
             "latestFit": state.latestFit.model_dump(mode="json") if state.latestFit else None,
             "latestArPreviewProductId": state.latestArPreviewProductId,
+            "pendingPurchase": (
+                {
+                    "id": state.pendingPurchase.id,
+                    "confirmationReference": state.pendingPurchase.confirmationReference,
+                    "status": state.pendingPurchase.status,
+                    "productId": state.pendingPurchase.productId,
+                    "title": state.pendingPurchase.title,
+                    "total": state.pendingPurchase.total,
+                    "currency": state.pendingPurchase.currency,
+                }
+                if state.pendingPurchase else None
+            ),
             "rememberedPreferences": state.rememberedPreferences,
             "recentMessages": [
                 {"role": item.role, "text": item.text}
@@ -228,6 +269,55 @@ Never invent an ID or index.""",
                     action="compare_products",
                     arguments=CompareProductsArgs(resultNumbers=compare.resultNumbers),
                 )
+            if choice.action == "prepare_purchase":
+                reference = cast(
+                    _ReferenceDecision,
+                    await self._request_json(
+                        client,
+                        _ReferenceDecision,
+                        """Resolve only the product reference in the CURRENT purchase message.
+Ordinal words identify a one-based search result: first=1, second=2, third=3.
+For this/that/it use selectedProductId. A bare quantity request such as "get two"
+refers to the selected product, so use selectedProductId and do not set resultNumber.
+Never invent an ID or result number.""",
+                        turn,
+                    ),
+                )
+                quantity = cast(
+                    _QuantityDecision,
+                    await self._request_json(
+                        client,
+                        _QuantityDecision,
+                        """Extract only the cardinal purchase quantity from the CURRENT message.
+Default to 1. "Get two", "buy 2", and "two of them" mean quantity=2.
+Ordinal product references never change quantity: "buy the second one" means quantity=1.
+Return only the requested JSON.""",
+                        turn,
+                    ),
+                )
+                return PreparePurchaseAction(
+                    action="prepare_purchase",
+                    arguments=PreparePurchaseArgs(
+                        productId=reference.productId,
+                        resultNumber=reference.resultNumber,
+                        quantity=quantity.quantity,
+                    ),
+                )
+            if choice.action == "confirm_purchase":
+                pending = state.pendingPurchase
+                return ConfirmPurchaseAction(
+                    action="confirm_purchase",
+                    arguments=ConfirmPurchaseArgs(
+                        intentId=pending.id if pending else None,
+                        confirmationReference=pending.confirmationReference if pending else None,
+                    ),
+                )
+            if choice.action == "cancel_purchase":
+                return CancelPurchaseAction(action="cancel_purchase", arguments=EmptyArgs())
+            if choice.action == "get_purchase_status":
+                return GetPurchaseStatusAction(action="get_purchase_status", arguments=EmptyArgs())
+            if choice.action == "open_checkout":
+                return OpenCheckoutAction(action="open_checkout", arguments=EmptyArgs())
             clarification = cast(
                 _ClarifyDecision,
                 await self._request_json(
@@ -275,6 +365,11 @@ Never invent an ID or index.""",
                     else None
                 ),
                 "fit": outcome.fit.model_dump(mode="json") if outcome.fit else None,
+                "purchase": outcome.purchase.model_dump(mode="json") if outcome.purchase else None,
+                "trustVerification": (
+                    outcome.trustVerification.model_dump(mode="json")
+                    if outcome.trustVerification else None
+                ),
             },
             "session": {
                 "selectedProductId": state.selectedProductId,
@@ -282,6 +377,10 @@ Never invent an ID or index.""",
                 "constraints": state.constraints.model_dump(mode="json"),
                 "measuredSpace": state.measuredSpace.model_dump(mode="json") if state.measuredSpace else None,
                 "latestArPreviewProductId": state.latestArPreviewProductId,
+                "purchaseStatus": (
+                    (state.pendingPurchase or state.lastPurchase).status
+                    if (state.pendingPurchase or state.lastPurchase) else None
+                ),
             },
         }
         async with httpx.AsyncClient(timeout=self._timeout) as client:
@@ -353,6 +452,24 @@ class DeterministicFallbackPlanner:
 
         if any(phrase in text for phrase in ("start over", "reset chat", "reset conversation")):
             return ResetSessionAction(action="reset_session", arguments=EmptyArgs())
+
+        if any(phrase in text for phrase in ("cancel purchase", "cancel order", "don't buy", "never mind", "forget that")):
+            return CancelPurchaseAction(action="cancel_purchase", arguments=EmptyArgs())
+
+        if state.pendingPurchase is not None and any(word in text for word in ("confirm", "yes", "proceed")):
+            return ConfirmPurchaseAction(
+                action="confirm_purchase",
+                arguments=ConfirmPurchaseArgs(
+                    intentId=state.pendingPurchase.id,
+                    confirmationReference=state.pendingPurchase.confirmationReference,
+                ),
+            )
+
+        if any(word in text for word in ("buy", "purchase", "order")):
+            return PreparePurchaseAction(action="prepare_purchase", arguments=PreparePurchaseArgs(
+                productId=reference.productId,
+                resultNumber=reference.resultNumber,
+            ))
 
         if any(phrase in text for phrase in ("in my room", "in my space", "view in my", "preview in ar")):
             return RequestArPreviewAction(action="request_ar_preview", arguments=reference)

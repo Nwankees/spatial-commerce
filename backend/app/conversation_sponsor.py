@@ -11,7 +11,7 @@ from .conversation_models import (
     RefineSearchAction,
     ToolOutcome,
 )
-from .integrations.models import FitHistoryRecord, SavedProductRecord, UserSessionRecord
+from .integrations.models import FitHistoryRecord, PurchaseIntentRecord, SavedProductRecord, UserSessionRecord
 from .integrations.service import SponsorIntegrationService
 
 logger = logging.getLogger("app.conversation.sponsor")
@@ -131,6 +131,28 @@ class ConversationSponsorBridge:
                         measuredWidthMeters=state.measuredSpace.widthMeters,
                         measuredDepthMeters=state.measuredSpace.depthMeters,
                         result=fit.verdict,
+                    )
+                ),
+            )
+
+        purchase = outcome.purchase
+        if purchase is not None:
+            await self._fail_open(
+                "purchase",
+                self._service.save_purchase(
+                    PurchaseIntentRecord(
+                        sessionId=identity,
+                        intentId=purchase.id,
+                        productId=purchase.productId,
+                        merchant=purchase.merchant,
+                        merchantUrl=purchase.merchantUrl,
+                        amount=purchase.total,
+                        currency=purchase.currency,
+                        quantity=purchase.quantity,
+                        status=purchase.status,
+                        trustedAgentStatus=purchase.trustedAgentStatus,
+                        commerceProvider=purchase.commerceProvider,
+                        isSimulation=purchase.isSimulation,
                     )
                 ),
             )

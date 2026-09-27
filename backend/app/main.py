@@ -56,6 +56,8 @@ from .conversation_service import ConversationService
 from .conversation_store import ConversationNotFoundError, ConversationStore
 from .conversation_sponsor import ConversationSponsorBridge
 from .conversation_tools import ShoppingToolExecutor
+from .commerce_models import MerchantVerificationRequest, TrustVerification
+from .commerce_service import CommerceService
 from .integrations import SponsorIntegrationService
 from .sponsor_api import get_sponsor_integration_service, router as sponsor_router
 
@@ -219,6 +221,11 @@ def get_conversation_store() -> ConversationStore:
     return ConversationStore()
 
 
+@lru_cache
+def get_commerce_service() -> CommerceService:
+    return CommerceService()
+
+
 def get_product_search_service(
     settings: Settings = Depends(get_settings),
 ) -> ProductSearchService:
@@ -268,6 +275,7 @@ def get_conversation_service(
     cache: ProductSearchCache = Depends(get_product_cache),
     store: ConversationStore = Depends(get_conversation_store),
     sponsor: SponsorIntegrationService = Depends(get_sponsor_integration_service),
+    commerce: CommerceService = Depends(get_commerce_service),
 ) -> ConversationService:
     planner = OllamaConversationPlanner(
         settings.ollama_base_url,
@@ -280,6 +288,7 @@ def get_conversation_service(
         M6CachedDimensionGateway(dimensions, resolutions),
         ar_preview=M6ArPreviewGateway(ar_preview.request),
         product_lookup=cache.find_product,
+        commerce=commerce,
     )
     return ConversationService(
         store,
@@ -294,11 +303,18 @@ def get_conversation_service(
 def create_app() -> FastAPI:
     app = FastAPI(
         title="Spatial Commerce Visual Analysis",
-        version="0.7.0",
+        version="0.8.0",
         docs_url="/docs",
         redoc_url=None,
     )
     app.include_router(sponsor_router)
+
+    @app.post("/api/v1/commerce/merchant/verify", response_model=TrustVerification)
+    async def verify_trusted_agent(
+        request: MerchantVerificationRequest,
+        commerce: CommerceService = Depends(get_commerce_service),
+    ) -> TrustVerification:
+        return commerce.verifier.verify(request.envelope, request.intent)
 
     @app.get("/health")
     async def health(settings: Settings = Depends(get_settings)) -> dict[str, object]:

@@ -53,6 +53,21 @@ Conversation endpoints:
 
 Implemented tools cover visual + text product search/refinement/selection, details/comparison, two-axis fit checks, and M6's real selected-product reconstruction service. Conversational fit and AR share M6's dimension cache; the AR action starts or joins the real SF3D job and Android continues through the normal real-scale placement flow. It never substitutes the built-in chair.
 
+## Visa-aligned agentic commerce (Milestone 8)
+
+M8 extends the same Qwen planner with typed `prepare_purchase`, `confirm_purchase`,
+`cancel_purchase`, `get_purchase_status`, and `open_checkout` actions. Products, prices,
+merchants, variants, and URLs are resolved from backend session/search state. Preparing a purchase
+only creates a review; a separate confirmation tied to the active intent ID and nonce is required.
+Changing the result set or selection cancels the pending review, so a stale “yes” cannot authorize it.
+
+The backend signs the confirmed intent with an ephemeral Ed25519 development key using an
+RFC 9421-style signature over authority, path, and content digest. The controlled merchant verifier
+checks timestamps, the eight-minute lifetime, key ID, signature, payload integrity, and nonce replay.
+Completion is deliberately labeled `COMPLETED_SIMULATED`, `isSimulation=true`, and
+`visaCertified=false`; no Visa Intelligent Commerce credential, PAN, CVV, or real payment is used.
+The exact merchant URL is preserved for an explicit handoff. No additional M8 API key is required.
+
 ## Product search
 
 `POST /api/v1/products/search` accepts the validated `analysis`, the same `imageBase64`/rotation used for analysis, and `maxResults`. Text queries run through SerpApi Google Shopping while the photographed object is uploaded directly to SerpApi's Image API and searched through Google Lens `products`, `visual_matches`, and `exact_matches`; the image never needs a public URL. Results are deduplicated and reranked together, with bounded one-candidate-at-a-time local Qwen3-VL comparisons over the top-three shortlist. Either retrieval path can fail independently. `SERPAPI_API_KEY` stays server-side; `LENS_SEARCH_ENABLED`, `LENS_MODES`, `VISUAL_RERANK_ENABLED`, and `VISUAL_RERANK_MAX_CANDIDATES` tune the feature. Successful live results are cached in `.cache/product_search_cache.json` for dimension/AR handoff and failure fallback.
