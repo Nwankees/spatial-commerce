@@ -84,6 +84,9 @@ class ConversationSession(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     id: str
+    # A stable, pseudonymous device identity may be supplied by Android so
+    # optional sponsor storage can span process-local conversation IDs.
+    shopperId: str | None = Field(default=None, min_length=1, max_length=120)
     analyzedObject: VisualProductAnalysis | None = None
     # Prepared JPEG bytes stay backend-only. They are never serialized into the
     # planner prompt, conversation history, or an Android response.
@@ -95,6 +98,14 @@ class ConversationSession(BaseModel):
     measuredSpace: MeasuredSpace | None = None
     latestFit: FitAssessment | None = None
     latestArPreviewProductId: str | None = None
+    # Backboard recall is planner-only context. It is deliberately excluded
+    # from API serialization and is never treated as an instruction.
+    rememberedPreferences: list[str] = Field(
+        default_factory=list,
+        max_length=5,
+        exclude=True,
+        repr=False,
+    )
     activePhase: Literal["planning", "executing", "responding"] | None = None
     activeAction: ConversationActionName | None = None
     messages: list[ConversationMessage] = Field(default_factory=list, max_length=40)
@@ -109,6 +120,7 @@ class ConversationSession(BaseModel):
 class ConversationStateView(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
+    shopperId: str | None = None
     analyzedObject: VisualProductAnalysis | None = None
     analyzedImageAvailable: bool = False
     constraints: SearchConstraints
@@ -123,6 +135,7 @@ class ConversationStateView(BaseModel):
     @classmethod
     def from_session(cls, session: ConversationSession) -> ConversationStateView:
         return cls(
+            shopperId=session.shopperId,
             analyzedObject=session.analyzedObject,
             analyzedImageAvailable=session.analyzedImageBytes is not None,
             constraints=session.constraints,
@@ -149,6 +162,7 @@ class ConversationContextRequest(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
+    shopperId: str | None = Field(default=None, min_length=1, max_length=120)
     analysis: VisualProductAnalysis | None = None
     imageBase64: str | None = Field(default=None, max_length=16_000_000)
     mimeType: Literal["image/jpeg", "image/png"] = "image/jpeg"

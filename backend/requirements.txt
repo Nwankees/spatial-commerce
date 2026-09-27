@@ -7,4 +7,5 @@ trimesh>=4.4,<5
 scipy>=1.11,<2
 Pillow>=11,<13
 pydantic-settings>=2.6,<3
+pymongo[srv]>=4.10,<5
 uvicorn[standard]>=0.30,<1

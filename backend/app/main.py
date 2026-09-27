@@ -54,7 +54,10 @@ from .conversation_models import (
 from .conversation_planner import OllamaConversationPlanner
 from .conversation_service import ConversationService
 from .conversation_store import ConversationNotFoundError, ConversationStore
+from .conversation_sponsor import ConversationSponsorBridge
 from .conversation_tools import ShoppingToolExecutor
+from .integrations import SponsorIntegrationService
+from .sponsor_api import get_sponsor_integration_service, router as sponsor_router
 
 logger = logging.getLogger(__name__)
 _app_logger = logging.getLogger("app")
@@ -264,6 +267,7 @@ def get_conversation_service(
     ar_preview: ArPreviewService = Depends(get_ar_preview_service),
     cache: ProductSearchCache = Depends(get_product_cache),
     store: ConversationStore = Depends(get_conversation_store),
+    sponsor: SponsorIntegrationService = Depends(get_sponsor_integration_service),
 ) -> ConversationService:
     planner = OllamaConversationPlanner(
         settings.ollama_base_url,
@@ -283,6 +287,7 @@ def get_conversation_service(
         tools,
         response_writer=planner,
         product_lookup=cache.find_product,
+        sponsor_bridge=ConversationSponsorBridge(sponsor),
     )
 
 
@@ -293,6 +298,7 @@ def create_app() -> FastAPI:
         docs_url="/docs",
         redoc_url=None,
     )
+    app.include_router(sponsor_router)
 
     @app.get("/health")
     async def health(settings: Settings = Depends(get_settings)) -> dict[str, object]:

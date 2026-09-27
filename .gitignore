@@ -27,6 +27,7 @@ Thumbs.db
 .env
 .env.*
 !.env.example
+deploy/vultr.env
 secrets.properties
 keystore.properties
 *.jks

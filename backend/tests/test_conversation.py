@@ -27,6 +27,7 @@ from app.conversation_planner import (
 )
 from app.conversation_ar import M6ArPreviewGateway, M6CachedDimensionGateway
 from app.conversation_service import ConversationService
+from app.conversation_sponsor import ConversationSponsorBridge
 from app.conversation_store import ConversationStore
 from app.conversation_tools import (
     ArPreviewGatewayResult,
@@ -37,6 +38,7 @@ from app.dimension_models import ResolvedDimensions
 from app.dimension_resolver import ResolutionCache
 from app.models import VisualProductAnalysis
 from app.main import app, get_conversation_service
+from app.integrations import build_sponsor_integration_service
 from app.product_models import ProductCandidate, ProductDimensions, ProductSearchResponse
 
 
@@ -125,6 +127,16 @@ class QueuePlanner:
 
     async def plan(self, message, state):
         return self.actions.pop(0)
+
+
+class StateCapturingPlanner(QueuePlanner):
+    def __init__(self, *actions) -> None:
+        super().__init__(*actions)
+        self.remembered: list[list[str]] = []
+
+    async def plan(self, message, state):
+        self.remembered.append(list(state.rememberedPreferences))
+        return await super().plan(message, state)
 
 
 class MalformedPlanner:
@@ -417,3 +429,100 @@ def test_session_reset_clears_references_and_constraints() -> None:
     assert reset.state.selectedProductId is None
     assert reset.state.measuredSpace is None
     assert reset.state.analyzedObject is None
+
+
+def test_sponsor_bridge_recalls_hints_and_persists_typed_successes() -> None:
+    async def scenario() -> None:
+        shopper_id = "android-shopper-123"
+        sponsor = build_sponsor_integration_service(object())
+        await sponsor.remember(shopper_id, "Prefers compact modern furniture", "preference")
+        planner = StateCapturingPlanner(
+            RefineSearchAction(
+                action="refine_search",
+                arguments={"constraints": {"color": "black", "maxPrice": 100}},
+            ),
+            CheckFitAction(action="check_fit", arguments=ProductReferenceArgs(resultNumber=1)),
+        )
+        bridge = ConversationSponsorBridge(sponsor, recall_timeout_seconds=0.1)
+        service = ConversationService(
+            ConversationStore(),
+            planner,
+            ShoppingToolExecutor(FakeSearch(), FakeDimensions()),
+            sponsor_bridge=bridge,
+        )
+        session_id = service.create().sessionId
+        synced = service.sync_context(
+            session_id,
+            ConversationContextRequest(
+                shopperId=shopper_id,
+                analysis=analysis(),
+                products=PRODUCTS,
+                measuredSpace=MeasuredSpace(widthMeters=1, depthMeters=1),
+            ),
+        )
+        assert synced.state.shopperId == shopper_id
+
+        refined = await service.turn(session_id, "Only black options under $100")
+        assert refined.status == "success"
+        await bridge.wait_pending()
+        fit = await service.turn(session_id, "Will that one fit?")
+        assert fit.status == "success"
+        await bridge.wait_pending()
+
+        assert planner.remembered[0] == ["Prefers compact modern furniture"]
+        assert any("explicitRefinement" in value for value in planner.remembered[1])
+        saved_session = await sponsor.get_session(shopper_id)
+        saved_products = await sponsor.recent_products(shopper_id, 5)
+        saved_fits = await sponsor.fit_history(shopper_id, 5)
+        memories = await sponsor.search_memory(shopper_id, "black", 5)
+        assert saved_session is not None and saved_session.conversationId == session_id
+        assert [item.productId for item in saved_products] == [PRODUCTS[1].id]
+        assert saved_fits[0].result == "fits"
+        assert any('"color":"black"' in item.content for item in memories.memories)
+
+        reset = service.reset(session_id)
+        assert reset.state.shopperId == shopper_id
+
+    asyncio.run(scenario())
+
+
+def test_sponsor_bridge_times_out_and_fails_open() -> None:
+    class FailingSponsor:
+        async def search_memory(self, session_id, query, limit):
+            await asyncio.sleep(1)
+
+        async def save_session(self, record):
+            raise RuntimeError("offline")
+
+        async def save_product(self, record):
+            raise RuntimeError("offline")
+
+        async def save_fit(self, record):
+            raise RuntimeError("offline")
+
+        async def remember(self, session_id, content, kind):
+            raise RuntimeError("offline")
+
+    async def scenario() -> None:
+        action = RefineSearchAction(
+            action="refine_search",
+            arguments={"constraints": {"maxPrice": 200}},
+        )
+        planner = StateCapturingPlanner(action)
+        bridge = ConversationSponsorBridge(FailingSponsor(), recall_timeout_seconds=0.001)
+        service = ConversationService(
+            ConversationStore(),
+            planner,
+            ShoppingToolExecutor(FakeSearch(), FakeDimensions()),
+            sponsor_bridge=bridge,
+        )
+        session_id = service.create().sessionId
+        service.sync_context(session_id, ConversationContextRequest(products=PRODUCTS))
+
+        result = await service.turn(session_id, "Under $200")
+        await bridge.wait_pending()
+
+        assert result.status == "success"
+        assert planner.remembered == [[]]
+
+    asyncio.run(scenario())

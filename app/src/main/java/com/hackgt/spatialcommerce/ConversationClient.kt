@@ -13,6 +13,7 @@ import java.util.concurrent.ScheduledExecutorService
 import java.util.concurrent.TimeUnit
 
 data class ConversationContext(
+    val shopperId: String,
     val analysis: VisualProductAnalysis?,
     val products: List<ProductCandidate>,
     val selectedProductId: String?,
@@ -140,6 +141,7 @@ class ConversationClient(
 
     private fun syncContext(id: String, context: ConversationContext) {
         val body = JSONObject().apply {
+            put("shopperId", context.shopperId)
             put("analysis", context.analysis?.let { JSONObject(it.rawJson) } ?: JSONObject.NULL)
             put(
                 "imageBase64",

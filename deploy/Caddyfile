@@ -1,0 +1,21 @@
+{$PUBLIC_DOMAIN:localhost} {
+    encode zstd gzip
+
+    handle /api/v1/sponsor/* {
+        reverse_proxy backend:8000
+    }
+
+    handle /health {
+        respond "ok" 200
+    }
+
+    handle {
+        reverse_proxy site:80
+    }
+
+    header {
+        Strict-Transport-Security "max-age=31536000; includeSubDomains"
+        X-Content-Type-Options "nosniff"
+        Referrer-Policy "strict-origin-when-cross-origin"
+    }
+}

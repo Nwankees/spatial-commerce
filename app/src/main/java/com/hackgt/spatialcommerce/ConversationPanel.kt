@@ -17,12 +17,16 @@ class ConversationPanel(
     context: Context,
     private val onSend: (String) -> Unit,
     private val onClose: () -> Unit,
+    private val onVoiceEnabledChanged: (Boolean) -> Unit,
+    private val onStopVoice: () -> Unit,
 ) : LinearLayout(context) {
     private val transcript: TextView
     private val scroll: ScrollView
     private val input: EditText
     private val sendButton: Button
     private val progress: TextView
+    private val voiceButton: Button
+    private var voiceEnabled = false
 
     init {
         orientation = VERTICAL
@@ -66,6 +70,27 @@ class ConversationPanel(
             visibility = View.GONE
         }
         addView(progress)
+
+        voiceButton = Button(context).apply {
+            text = "Voice: Off"
+            isAllCaps = false
+            setOnClickListener {
+                voiceEnabled = !voiceEnabled
+                text = if (voiceEnabled) "Voice: On" else "Voice: Off"
+                onVoiceEnabledChanged(voiceEnabled)
+            }
+        }
+        val stopVoiceButton = Button(context).apply {
+            text = "Stop voice"
+            isAllCaps = false
+            setOnClickListener { onStopVoice() }
+        }
+        addView(LinearLayout(context).apply {
+            orientation = HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            addView(voiceButton, LayoutParams(0, dp(44), 1f))
+            addView(stopVoiceButton, LayoutParams(0, dp(44), 1f).apply { marginStart = dp(8) })
+        })
 
         input = EditText(context).apply {
             hint = "e.g. Would the second one fit here?"
@@ -120,6 +145,8 @@ class ConversationPanel(
         input.isEnabled = true
         append("Assistant", message)
     }
+
+    fun isVoiceEnabled(): Boolean = voiceEnabled
 
     private fun submit() {
         val message = input.text.toString().trim()

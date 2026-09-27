@@ -52,6 +52,8 @@ class ConversationStore:
     ) -> ConversationSession:
         session = self.get(session_id)
         supplied = context.model_fields_set
+        if "shopperId" in supplied:
+            session.shopperId = context.shopperId
         if "analysis" in supplied:
             session.analyzedObject = context.analysis
         if "imageBase64" in supplied:
@@ -74,8 +76,8 @@ class ConversationStore:
         return session
 
     def reset(self, session_id: str) -> ConversationSession:
-        self.get(session_id)
-        replacement = ConversationSession(id=session_id)
+        current = self.get(session_id)
+        replacement = ConversationSession(id=session_id, shopperId=current.shopperId)
         with self._guard:
             self._sessions[session_id] = replacement
         return replacement

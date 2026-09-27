@@ -64,6 +64,24 @@ class Settings(BaseSettings):
     reconstruction_timeout_seconds: float = 300.0
     ar_asset_cache_dir: str = ".cache/ar-assets"
 
+    # Optional Milestone 9 sponsor services. Every provider is fail-open and
+    # the app uses local/in-memory behavior when these values are absent.
+    mongodb_uri: str | None = None
+    mongodb_database: str = "will_it_fit"
+    backboard_api_key: str | None = None
+    backboard_assistant_id: str | None = None
+    backboard_base_url: str = "https://app.backboard.io/api"
+    elevenlabs_api_key: str | None = None
+    elevenlabs_voice_id: str | None = None
+    elevenlabs_model_id: str = "eleven_flash_v2_5"
+    elevenlabs_output_format: str = "mp3_44100_128"
+    elevenlabs_timeout_seconds: float = 20.0
+    sponsor_timeout_seconds: float = 8.0
+    public_base_url: str | None = None
+    # Optional shared boundary for the single-device hosted demo. A blank value
+    # keeps local development credential-free; it is not user authentication.
+    sponsor_demo_token: str | None = None
+
 
 @lru_cache
 def get_settings() -> Settings:

@@ -27,6 +27,7 @@ import com.google.ar.core.Session
 import com.google.ar.core.exceptions.CameraNotAvailableException
 import com.google.ar.core.exceptions.UnavailableException
 import java.util.concurrent.ConcurrentLinkedQueue
+import java.util.UUID
 
 class MainActivity : Activity() {
     private lateinit var surfaceView: GLSurfaceView
@@ -48,6 +49,8 @@ class MainActivity : Activity() {
     private val productSearchClient = ProductSearchClient()
     private val arPreviewClient = ArPreviewClient()
     private val conversationClient = ConversationClient()
+    private val sponsorVoiceClient = SponsorVoiceClient()
+    private val shopperId: String by lazy { stableShopperId() }
     private var currentMode = InteractionMode.MEASURE
 
     // Milestone 6 state. Only touched on the UI thread.
@@ -145,7 +148,12 @@ class MainActivity : Activity() {
         conversationPanel = ConversationPanel(
             context = this,
             onSend = { message -> sendConversationMessage(message) },
-            onClose = { conversationPanel.close() },
+            onClose = {
+                sponsorVoiceClient.stop()
+                conversationPanel.close()
+            },
+            onVoiceEnabledChanged = { enabled -> if (!enabled) sponsorVoiceClient.stop() },
+            onStopVoice = { sponsorVoiceClient.stop() },
         )
         chatButton.setOnClickListener { conversationPanel.open() }
         resultsPanel = ProductResultsPanel(
@@ -325,6 +333,7 @@ class MainActivity : Activity() {
         productSearchClient.close()
         arPreviewClient.close()
         conversationClient.close()
+        sponsorVoiceClient.close()
         session?.close()
         session = null
         super.onDestroy()
@@ -459,11 +468,13 @@ class MainActivity : Activity() {
     }
 
     private fun sendConversationMessage(message: String) {
+        sponsorVoiceClient.stop()
         conversationGeneration += 1
         val generation = conversationGeneration
         val contextVersion = conversationContextVersion
         conversationRequestInFlight = true
         val context = ConversationContext(
+            shopperId = shopperId,
             analysis = lastAnalysis,
             products = lastProductSearch?.products.orEmpty(),
             selectedProductId = selectedProduct?.id,
@@ -508,6 +519,13 @@ class MainActivity : Activity() {
 
     private fun applyConversationReply(reply: ConversationReply) {
         conversationPanel.showReply(reply.message)
+        if (conversationPanel.isVoiceEnabled()) {
+            sponsorVoiceClient.speak(reply.message) { reason ->
+                if (conversationPanel.isVoiceEnabled()) {
+                    Toast.makeText(this, reason, Toast.LENGTH_SHORT).show()
+                }
+            }
+        }
         var contextChanged = false
         if (reply.products.isNotEmpty()) {
             val search = reply.searchResult
@@ -665,6 +683,15 @@ class MainActivity : Activity() {
         renderer.setMode(InteractionMode.MEASURE_SPACE)
         updateModeUi(InteractionMode.MEASURE_SPACE)
         resultsPanel.visibility = View.GONE
+    }
+
+    /** Stable random app-install identity; it contains no account, device, or contact information. */
+    private fun stableShopperId(): String {
+        val preferences = getSharedPreferences(SHOPPER_PREFERENCES, Context.MODE_PRIVATE)
+        preferences.getString(SHOPPER_ID_KEY, null)?.trim()?.takeIf { it.isNotEmpty() }?.let { return it }
+        return "shopper_${UUID.randomUUID()}".also { generated ->
+            preferences.edit().putString(SHOPPER_ID_KEY, generated).apply()
+        }
     }
 
     private fun beginConversationArPreview(product: ProductCandidate?) {
@@ -859,6 +886,8 @@ class MainActivity : Activity() {
 
     companion object {
         private const val CAMERA_PERMISSION_REQUEST = 1001
+        private const val SHOPPER_PREFERENCES = "spatial_commerce_identity"
+        private const val SHOPPER_ID_KEY = "pseudonymous_shopper_id"
     }
 }
 

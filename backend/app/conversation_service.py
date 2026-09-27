@@ -22,6 +22,7 @@ from .conversation_planner import (
     PlannerUnavailableError,
 )
 from .conversation_store import ConversationStore
+from .conversation_sponsor import ConversationSponsorBridge
 from .conversation_tools import ShoppingToolExecutor
 from .product_models import ProductCandidate
 
@@ -36,6 +37,7 @@ class ConversationService:
         fallback_planner: ConversationPlanner | None = None,
         response_writer: ConversationResponseWriter | None = None,
         product_lookup: Callable[[str], ProductCandidate | None] | None = None,
+        sponsor_bridge: ConversationSponsorBridge | None = None,
     ) -> None:
         self._store = store
         self._planner = planner
@@ -43,6 +45,7 @@ class ConversationService:
         self._fallback = fallback_planner or DeterministicFallbackPlanner()
         self._response_writer = response_writer
         self._product_lookup = product_lookup
+        self._sponsor_bridge = sponsor_bridge
 
     def create(self) -> CreateConversationResponse:
         session = self._store.create()
@@ -98,6 +101,8 @@ class ConversationService:
                 state.messages.append(ConversationMessage(role="user", text=message))
                 state.activePhase = "planning"
                 state.activeAction = None
+                if self._sponsor_bridge is not None:
+                    await self._sponsor_bridge.recall(state, message)
                 planner_mode = "local_qwen"
                 try:
                     action = await self._planner.plan(message, state)
@@ -125,6 +130,9 @@ class ConversationService:
                             status="error",
                             message="That shopping action failed safely. Your previous results and selection are still available.",
                         )
+
+                if self._sponsor_bridge is not None and outcome.status == "success":
+                    self._sponsor_bridge.record_success(state, action, outcome)
 
                 response_message = outcome.message
                 response_writer_mode = "deterministic_fallback"

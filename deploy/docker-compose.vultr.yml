@@ -1,0 +1,43 @@
+services:
+  backend:
+    build:
+      context: ../backend
+    restart: unless-stopped
+    env_file:
+      - ${VULTR_ENV_FILE:-./vultr.env}
+    expose:
+      - "8000"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/api/v1/sponsor/status', timeout=3)"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
+  site:
+    build:
+      context: ../companion-site
+    restart: unless-stopped
+    expose:
+      - "80"
+
+  gateway:
+    image: caddy:2.9-alpine
+    restart: unless-stopped
+    depends_on:
+      backend:
+        condition: service_healthy
+      site:
+        condition: service_started
+    environment:
+      PUBLIC_DOMAIN: ${PUBLIC_DOMAIN}
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+
+volumes:
+  caddy_data:
+  caddy_config:

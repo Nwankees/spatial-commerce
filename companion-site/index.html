@@ -1,0 +1,149 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta
+      name="description"
+      content="Will It Fit? turns a phone camera into a spatial shopping assistant: identify products, measure a space, verify fit, and preview at real scale."
+    />
+    <meta name="theme-color" content="#f4efe6" />
+    <title>Will It Fit? — Spatial shopping that measures twice</title>
+    <link rel="icon" href="favicon.svg" type="image/svg+xml" />
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700&amp;family=Space+Grotesk:wght@500;600;700&amp;display=swap"
+      rel="stylesheet"
+    />
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <div class="noise" aria-hidden="true"></div>
+    <header class="nav shell">
+      <a class="brand" href="#top" aria-label="Will It Fit home">
+        <span class="brand-mark" aria-hidden="true"><i></i><i></i></span>
+        <span>Will It Fit?</span>
+      </a>
+      <nav aria-label="Primary navigation">
+        <a href="#how">How it works</a>
+        <a href="#stack">Built with</a>
+        <a class="nav-cta" href="#demo">See the demo</a>
+      </nav>
+    </header>
+
+    <main id="top">
+      <section class="hero shell">
+        <div class="hero-copy">
+          <p class="eyebrow"><span></span> Spatial commerce, made human</p>
+          <h1>See it. Size it.<br /><em>Know it fits.</em></h1>
+          <p class="lede">
+            Point your phone at something you love, find real products like it, measure the space,
+            and preview your pick at true scale—before you buy.
+          </p>
+          <div class="hero-actions">
+            <a class="button primary" href="#how">Follow the flow <span>↘</span></a>
+            <a class="button ghost" href="https://github.com/Nwankees/spatial-commerce">View the build</a>
+          </div>
+          <div class="trust-row" aria-label="Product highlights">
+            <span>ARCore</span><b>•</b><span>Private local vision</span><b>•</b><span>Real dimensions</span>
+          </div>
+        </div>
+
+        <div class="hero-visual" aria-label="Will It Fit mobile experience preview">
+          <div class="orbit orbit-one"></div>
+          <div class="orbit orbit-two"></div>
+          <div class="phone">
+            <div class="phone-top"><span></span></div>
+            <div class="camera-view">
+              <div class="room-wall"></div>
+              <div class="floor-grid"></div>
+              <div class="chair" aria-hidden="true">
+                <span class="chair-back"></span><span class="chair-seat"></span>
+                <span class="chair-leg left"></span><span class="chair-leg right"></span>
+              </div>
+              <div class="measure width"><span>0.72 m</span></div>
+              <div class="measure depth"><span>0.68 m</span></div>
+              <div class="scan-corner tl"></div><div class="scan-corner tr"></div>
+              <div class="scan-corner bl"></div><div class="scan-corner br"></div>
+              <div class="fit-pill"><i></i> Fits your space</div>
+              <div class="camera-toolbar">
+                <button aria-label="Measure">⌁</button>
+                <button class="capture" aria-label="Capture"></button>
+                <button aria-label="Rotate">↻</button>
+              </div>
+            </div>
+          </div>
+          <div class="floating-card product-card">
+            <span class="mini-swatch"></span>
+            <div><small>Closest match</small><strong>Arlo Lounge Chair</strong><p>$129 · 96% match</p></div>
+          </div>
+          <div class="floating-card dimension-card"><small>Verified size</small><strong>28.3 × 26.8 in</strong></div>
+        </div>
+      </section>
+
+      <section class="marquee" aria-label="Key capabilities">
+        <div>
+          <span>SHOP WHAT YOU SEE</span><i>✦</i><span>MEASURE THE MOMENT</span><i>✦</i>
+          <span>PREVIEW AT TRUE SCALE</span><i>✦</i><span>BUY WITH CONFIDENCE</span><i>✦</i>
+          <span>SHOP WHAT YOU SEE</span><i>✦</i><span>MEASURE THE MOMENT</span><i>✦</i>
+        </div>
+      </section>
+
+      <section class="steps shell" id="how">
+        <div class="section-intro">
+          <p class="eyebrow"><span></span> Four moves, one confident choice</p>
+          <h2>From “I like that” to<br />“it fits right here.”</h2>
+        </div>
+        <div class="step-grid">
+          <article><b>01</b><div class="step-icon eye">◉</div><h3>Point</h3><p>Aim at a real object. Local vision understands its look, material, and style.</p></article>
+          <article><b>02</b><div class="step-icon search">⌕</div><h3>Find</h3><p>Search live shopping results for visually similar products at the right price.</p></article>
+          <article><b>03</b><div class="step-icon ruler">↔</div><h3>Measure</h3><p>AR measures the available footprint and compares it with verified product dimensions.</p></article>
+          <article><b>04</b><div class="step-icon cube">◇</div><h3>Preview</h3><p>Generate the selected product in 3D and place it at real-world scale.</p></article>
+        </div>
+      </section>
+
+      <section class="answer-band" id="demo">
+        <div class="shell answer-grid">
+          <div>
+            <p class="eyebrow light"><span></span> The answer before checkout</p>
+            <h2>No tape-measure math.<br />No return-label regret.</h2>
+          </div>
+          <div class="fit-demo">
+            <div class="space-box"><span class="object-box"></span><em>YOUR SPACE</em></div>
+            <div class="fit-copy"><span class="check">✓</span><div><strong>It fits—with room to breathe.</strong><p>8 cm clearance on width · 11 cm on depth</p></div></div>
+          </div>
+        </div>
+      </section>
+
+      <section class="stack shell" id="stack">
+        <div class="section-intro split">
+          <div><p class="eyebrow"><span></span> Purposeful integrations</p><h2>Every sponsor tool<br />does a real job.</h2></div>
+          <p>AR and GPU reconstruction stay close to the phone. Durable services run remotely when configured—and gracefully fall back when they are not.</p>
+        </div>
+        <div class="stack-grid">
+          <article><span class="stack-number">01</span><h3>MongoDB Atlas</h3><p>Saves sessions, selected products, dimension evidence, and fit history—not bulky 3D files.</p><i data-service="persistence">Optional · local fallback active</i></article>
+          <article><span class="stack-number">02</span><h3>Backboard</h3><p>Remembers useful shopping preferences and goals across conversations without replacing local session memory.</p><i data-service="memory">Optional · session fallback active</i></article>
+          <article><span class="stack-number">03</span><h3>ElevenLabs</h3><p>Turns concise shopping-agent answers into voice, with the original text always available.</p><i data-service="voice">Optional · text fallback active</i></article>
+          <article><span class="stack-number">04</span><h3>Vultr + .tech</h3><p>Hosts this public companion experience and non-GPU services while the demo laptop handles SF3D.</p><i>Deployment-ready</i></article>
+        </div>
+        <p id="service-note" class="service-note" role="status">Checking optional service status…</p>
+      </section>
+
+      <section class="closing shell">
+        <p class="eyebrow"><span></span> Built at HackGT 13</p>
+        <h2>Your room already knows the answer.</h2>
+        <p>Will It Fit? lets the product prove itself before your card ever leaves your wallet.</p>
+        <a class="button primary" href="#top">Back to the experience <span>↑</span></a>
+      </section>
+    </main>
+
+    <footer class="shell">
+      <a class="brand" href="#top"><span class="brand-mark"><i></i><i></i></span><span>Will It Fit?</span></a>
+      <p>Spatial commerce that measures twice.</p>
+      <span>HackGT 13 · Atlanta, GA</span>
+    </footer>
+    <script src="site-config.js"></script>
+    <script src="app.js"></script>
+  </body>
+</html>
