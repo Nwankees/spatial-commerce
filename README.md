@@ -55,6 +55,50 @@ After a successful analysis, a separate **Find similar products** action sends t
 
 The Android app shows the results in a scrollable panel above the lower overlay, with thumbnails (loaded with Coil), title, price, retailer, and rating. Tapping a result selects it and keeps it in app state for later milestones. The AR preview still renders only the locally authored Lighthouse chair; retrieved products are not rendered in AR.
 
+## Milestone 5: spatial fit (baseline; physically verified end to end together with Milestone 5.5)
+
+Selected real product → trustworthy product dimensions → measured available space → deterministic fit result.
+
+### Architecture
+
+- `POST /api/v1/products/dimensions` takes only `{"productId", "productUrl"}` of a product the backend itself returned from `/products/search`. The backend looks the product up in its own record (the product-search cache, which also stores the provider's server-side detail reference); unknown or mismatched products get a 404, and client-supplied dimensions or URLs are never trusted.
+- `DimensionResolver` gathers evidence from replaceable sources:
+  - `ProductDetailSource` → `SerpApiImmersiveProductDetailSource` (SerpApi Google Immersive Product API, keyed by the search result's `immersive_product_page_token`): explicit spec fields (`about_the_product.features`) and the list of stores with direct retailer links.
+  - `PageFetcher` → `HttpPageFetcher`: one plain HTTP GET per retailer page (no JavaScript), at most two pages, fetched concurrently, the result's own retailer first. Only public `http(s)` hosts are fetched (no IP literals, localhost, or Google URLs).
+  - `dimension_extraction` parses each page into per-source findings; `dimension_parsing` holds the pure, conservative parsing and unit rules.
+- Android adds **Measure space** mode, a **Check fit** action on the selected product, a `FitPanel`, and the pure `FitEngine`.
+
+### Dimension trust rules
+
+- Values are only taken from explicit source data, in this priority order: (1) schema.org JSON-LD on the retailer page (`width`/`depth`/`height` QuantitativeValues and `additionalProperty`), (2) structured metadata (provider product-detail spec fields and page microdata), (3) retailer spec tables (`<table>` rows and `<dl>` pairs), (4) explicitly labeled dimensions in retailer page text near a dimensions keyword.
+- A source stating all three axes wins by priority; otherwise the highest-priority source stating both width and depth; otherwise any partial source. Values from different sources are never mixed.
+- Never used: images, category averages, Gemini, product titles, untyped JSON embedded in page scripts (it often describes related products).
+- A number needs an explicit unit (mm, cm, m, in/″, ft, UN/CEFACT `MMT`/`CMT`/`MTR`/`INH`/`FOT`) or a unit declared by its label, e.g. `Width (in)`. Bare numbers are rejected.
+- Axes are mapped only from explicit labels: `Width`/`Overall Width`/…, `W`/`D`/`H` letters on each value, or an order declared in the label such as `Dimensions (W x D x H)`. Unlabeled `30 x 28 x 35 in`, any `L x W x H` order, a fourth value, fragments like the `6 in` in `2 ft 6 in`, and package/shipping/box/seat/arm/leg/interior/adjustable contexts are rejected. Two different values for the same axis in one source drop that axis.
+- Values outside 0.01–10 m are rejected as misparses.
+
+### Dimension provenance model
+
+`ResolvedDimensions`: `widthMeters`, `depthMeters`, `heightMeters` (null when not explicitly stated), `status` (`verified` = all three stated, `partial` = some stated, `unavailable`), `sourceType` (`json_ld`, `structured_metadata`, `spec_table`, `page_text`, `unavailable`), `sourceUrl`, `sourceName`, `rawDimensions` (the text the values were parsed from), `retryable`, and `message`. Timeouts, network errors, provider failures, and HTTP 429/5xx are retryable; blocked pages (401/403), non-HTML, and pages without dimensions are definitive `unavailable`. Definitive results are cached in memory for an hour to spare provider calls.
+
+### Fit formula
+
+```
+fits ⇔ productWidth + clearance ≤ availableWidth  AND  productDepth + clearance ≤ availableDepth
+widthRemaining = availableWidth − productWidth − clearance   (not clamped; negative = over)
+depthRemaining = availableDepth − productDepth − clearance
+```
+
+Milestone 5 uses `clearance = 0` (exact footprint) and compares the product in its stated orientation. Missing product width or depth → `UNKNOWN`; missing available width or depth → `NEEDS_MEASUREMENT`. No LLM participates.
+
+### Manual test procedure
+
+1. Start the backend and `adb reverse tcp:8000 tcp:8000`; launch the app.
+2. Analyze a real object, tap **Find similar products**, select a result, tap **Check fit**.
+3. Confirm the panel shows either product dimensions with their source, or **UNKNOWN — dimensions unavailable** with a reason (never invented values).
+4. Tap **Measure space**: tap the left then right edge of the available width, then the front then back edge of the available depth. Confirm `Available width` / `Available depth` readouts.
+5. Confirm **FITS** / **DOES NOT FIT** with per-axis spare or excess, then **Reset** and confirm the measurements clear and the result returns to **NEEDS MEASUREMENT**.
+
 ### Milestone 4 physical verification
 
 Milestone 4 was physically verified on September 26, 2026 using the Samsung Galaxy S25:

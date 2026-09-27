@@ -52,3 +52,20 @@ data class ProductSearchResult(
 ) {
     val isCached: Boolean get() = resultSource == "cache"
 }
+
+/** Dimensions of the selected product, resolved by the backend from explicit source data only. */
+data class ResolvedDimensions(
+    val productId: String,
+    val widthMeters: Double?,
+    val depthMeters: Double?,
+    val heightMeters: Double?,
+    /** "verified", "partial", or "unavailable". */
+    val status: String,
+    /** "json_ld", "structured_metadata", "spec_table", "page_text", or "unavailable". */
+    val sourceType: String,
+    val sourceUrl: String?,
+    val sourceName: String?,
+    val rawDimensions: String?,
+    val retryable: Boolean,
+    val message: String?,
+)

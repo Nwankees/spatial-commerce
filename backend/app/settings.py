@@ -19,6 +19,7 @@ class Settings(BaseSettings):
     serpapi_country: str = "us"
     serpapi_language: str = "en"
     product_cache_path: str = ".cache/product_search_cache.json"
+    retailer_fetch_timeout_seconds: float = 8.0
 
 
 @lru_cache

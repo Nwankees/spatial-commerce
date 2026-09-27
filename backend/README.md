@@ -26,6 +26,10 @@ The debug Android app then reaches the service at `http://127.0.0.1:8000` throug
 
 `POST /api/v1/products/search` accepts `{"analysis": <VisualProductAnalysis>, "maxResults": 5}` and returns the query used, the provider (`serpapi`), `resultSource` (`live` or `cache`), `cachedAt`, and normalized `ProductCandidate` results from SerpApi Google Shopping. It requires `SERPAPI_API_KEY`; `/health` reports `productSearchConfigured`. Successful live results are cached in `.cache/product_search_cache.json` and are only served, clearly labeled as cached, when a later live search for the same query fails.
 
+## Product dimensions
+
+`POST /api/v1/products/dimensions` accepts `{"productId", "productUrl"}` for a product previously returned by product search and returns `ResolvedDimensions` (meters, `verified`/`partial`/`unavailable`, source type, source URL/name, raw text, `retryable`). It uses SerpApi's Google Immersive Product API (same `SERPAPI_API_KEY`) plus plain HTTP fetches of up to two retailer pages (`RETAILER_FETCH_TIMEOUT_SECONDS`, default 8). Dimensions are never estimated; see the main README for the trust rules.
+
 ## Tests
 
 ```powershell

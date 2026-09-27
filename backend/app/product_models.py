@@ -66,6 +66,9 @@ class ProductCandidate(BaseModel):
     rating: float | None = Field(default=None, ge=0, le=5)
     reviewCount: int | None = Field(default=None, ge=0)
     dimensions: ProductDimensions = Field(default_factory=ProductDimensions)
+    # Provider reference for fetching product details later (Milestone 5).
+    # Kept server-side: excluded from API responses.
+    detailPageToken: str | None = Field(default=None, exclude=True, max_length=4000)
 
 
 class ProductSearchRequest(BaseModel):

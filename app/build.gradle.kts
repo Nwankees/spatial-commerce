@@ -10,8 +10,8 @@ android {
         applicationId = "com.hackgt.spatialcommerce"
         minSdk = 24
         targetSdk = 37
-        versionCode = 4
-        versionName = "0.4.0"
+        versionCode = 5
+        versionName = "0.5.0"
     }
 
     compileOptions {
@@ -25,4 +25,7 @@ dependencies {
     // Remote product thumbnails (caching, downsampling, cancellation).
     implementation("io.coil-kt.coil3:coil:3.3.0")
     implementation("io.coil-kt.coil3:coil-network-okhttp:3.3.0")
+
+    // JVM unit tests for the deterministic fit engine.
+    testImplementation("junit:junit:4.13.2")
 }

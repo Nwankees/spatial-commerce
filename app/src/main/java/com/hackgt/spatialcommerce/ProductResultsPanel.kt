@@ -26,10 +26,12 @@ class ProductResultsPanel(
     context: Context,
     private val onProductSelected: (ProductCandidate) -> Unit,
     private val onRetry: () -> Unit,
+    private val onCheckFit: () -> Unit,
 ) : LinearLayout(context) {
     private val headerText: TextView
     private val detailText: TextView
     private val retryButton: Button
+    private val checkFitButton: Button
     private val list: LinearLayout
     private val rowsById = mutableMapOf<String, View>()
     private val selectedLabelsById = mutableMapOf<String, TextView>()
@@ -70,6 +72,13 @@ class ProductResultsPanel(
             visibility = View.GONE
             setOnClickListener { onRetry() }
         }
+        checkFitButton = Button(context).apply {
+            text = "Check fit"
+            textSize = 14f
+            isAllCaps = false
+            visibility = View.GONE
+            setOnClickListener { onCheckFit() }
+        }
         list = LinearLayout(context).apply { orientation = VERTICAL }
         val scroll = MaxHeightScrollView(context, maxHeightPx = (resources.displayMetrics.heightPixels * 0.34f).toInt()).apply {
             isFillViewport = false
@@ -79,6 +88,7 @@ class ProductResultsPanel(
         addView(header, LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT))
         addView(detailText, LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT))
         addView(retryButton, LayoutParams(LayoutParams.WRAP_CONTENT, dp(48)))
+        addView(checkFitButton, LayoutParams(LayoutParams.WRAP_CONTENT, dp(48)))
         addView(scroll, LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT))
     }
 
@@ -125,9 +135,11 @@ class ProductResultsPanel(
             row.background = rowBackground(selected)
             selectedLabelsById[id]?.visibility = if (selected) View.VISIBLE else View.GONE
         }
+        checkFitButton.visibility = if (selectedId != null && rowsById.containsKey(selectedId)) View.VISIBLE else View.GONE
     }
 
     private fun clearRows() {
+        checkFitButton.visibility = View.GONE
         list.removeAllViews()
         rowsById.clear()
         selectedLabelsById.clear()

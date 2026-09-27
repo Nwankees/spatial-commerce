@@ -33,6 +33,8 @@ class MainActivity : Activity() {
     private lateinit var infoText: TextView
     private lateinit var measureButton: Button
     private lateinit var previewButton: Button
+    private lateinit var measureSpaceButton: Button
+    private lateinit var fitPanel: FitPanel
     private lateinit var analyzeButton: Button
     private lateinit var findProductsButton: Button
     private lateinit var resultsPanel: ProductResultsPanel
@@ -48,6 +50,14 @@ class MainActivity : Activity() {
     private var lastProductSearch: ProductSearchResult? = null
     /** The candidate the user picked; the handoff point for later milestones. */
     private var selectedProduct: ProductCandidate? = null
+
+    // Milestone 5 state. Only touched on the UI thread.
+    private var availableWidthMeters: Double? = null
+    private var availableDepthMeters: Double? = null
+    private var fitProduct: ProductCandidate? = null
+    private var fitDimensions: ResolvedDimensions? = null
+    private var fitGeneration = 0
+    private var fitLookupInFlight = false
 
     private var session: Session? = null
     private var installRequested = false
@@ -84,6 +94,7 @@ class MainActivity : Activity() {
 
         measureButton = modeButton("Measure")
         previewButton = modeButton("Preview product")
+        measureSpaceButton = modeButton("Measure space")
         val resetButton = modeButton("Reset")
         val rotateLeftButton = modeButton("Rotate -15°")
         val rotateRightButton = modeButton("Rotate +15°")
@@ -99,6 +110,7 @@ class MainActivity : Activity() {
             renderer.setMode(InteractionMode.PREVIEW_PRODUCT)
             updateModeUi(InteractionMode.PREVIEW_PRODUCT)
         }
+        measureSpaceButton.setOnClickListener { enterMeasureSpace() }
         resetButton.setOnClickListener { renderer.reset() }
         rotateLeftButton.setOnClickListener { renderer.rotateProduct(-15) }
         rotateRightButton.setOnClickListener { renderer.rotateProduct(15) }
@@ -112,6 +124,12 @@ class MainActivity : Activity() {
             context = this,
             onProductSelected = { product -> selectProduct(product) },
             onRetry = { beginProductSearch() },
+            onCheckFit = { beginFitCheck() },
+        )
+        fitPanel = FitPanel(
+            context = this,
+            onMeasureSpace = { enterMeasureSpace() },
+            onRetry = { beginFitCheck() },
         )
 
         rotationControls = LinearLayout(this).apply {
@@ -128,6 +146,7 @@ class MainActivity : Activity() {
             setPadding(dp(8), dp(8), dp(8), dp(12))
             addView(measureButton, weightedButtonParams())
             addView(previewButton, weightedButtonParams())
+            addView(measureSpaceButton, weightedButtonParams())
             addView(resetButton, weightedButtonParams())
         }
 
@@ -135,6 +154,7 @@ class MainActivity : Activity() {
             orientation = LinearLayout.VERTICAL
             setBackgroundColor(Color.argb(170, 17, 19, 24))
             addView(resultsPanel, LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT)
+            addView(fitPanel, LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT)
             addView(infoText, LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT)
             addView(rotationControls, LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT)
             addView(controls, LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT)
@@ -174,6 +194,7 @@ class MainActivity : Activity() {
             onInfo = { text -> infoText.post { infoText.text = text } },
             onCameraFrame = { frame -> onCameraFrameCaptured(frame) },
             onCameraCaptureError = { message -> showAnalysisError(message) },
+            onSpaceMeasured = { width, depth -> runOnUiThread { onAvailableSpaceMeasured(width, depth) } },
         )
         surfaceView.setRenderer(renderer)
         surfaceView.renderMode = GLSurfaceView.RENDERMODE_CONTINUOUSLY
@@ -369,11 +390,79 @@ class MainActivity : Activity() {
     }
 
     private fun selectProduct(product: ProductCandidate) {
+        if (product.id != fitProduct?.id) clearFitCheck()
         selectedProduct = product
         resultsPanel.markSelected(product.id)
         val retailer = product.retailer?.let { " at $it" }.orEmpty()
         statusText.text = "Selected: ${product.title} — ${product.displayPrice()}$retailer. " +
             "AR preview still shows only the Lighthouse chair."
+    }
+
+    private fun beginFitCheck() {
+        val product = selectedProduct ?: return
+        if (fitLookupInFlight && fitProduct?.id == product.id) return
+        fitGeneration += 1
+        val generation = fitGeneration
+        fitLookupInFlight = true
+        fitProduct = product
+        fitDimensions = null
+        fitPanel.showLoading(product)
+        statusText.text = "Looking up explicit product dimensions…"
+
+        productSearchClient.resolveDimensions(product) { result ->
+            runOnUiThread {
+                if (generation != fitGeneration) return@runOnUiThread
+                fitLookupInFlight = false
+                result.fold(
+                    onSuccess = { dimensions ->
+                        fitDimensions = dimensions
+                        refreshFit()
+                    },
+                    onFailure = { exception ->
+                        fitPanel.showError(exception.message ?: "Dimension lookup failed. Please retry.")
+                        statusText.text = "Fit check did not complete."
+                    },
+                )
+            }
+        }
+    }
+
+    /** Re-evaluates the deterministic fit whenever dimensions or measurements change. */
+    private fun refreshFit() {
+        val dimensions = fitDimensions ?: return
+        val result = FitEngine.evaluate(
+            productWidthMeters = dimensions.widthMeters,
+            productDepthMeters = dimensions.depthMeters,
+            availableWidthMeters = availableWidthMeters,
+            availableDepthMeters = availableDepthMeters,
+        )
+        fitPanel.show(result, dimensions)
+        statusText.text = when (result.verdict) {
+            FitVerdict.FITS -> "Fit check: FITS the measured space."
+            FitVerdict.DOES_NOT_FIT -> "Fit check: DOES NOT FIT the measured space."
+            FitVerdict.UNKNOWN -> "Fit check: UNKNOWN — explicit width and depth are unavailable."
+            FitVerdict.NEEDS_MEASUREMENT -> "Fit check: measure the available width and depth."
+        }
+    }
+
+    private fun onAvailableSpaceMeasured(width: Float?, depth: Float?) {
+        availableWidthMeters = width?.toDouble()
+        availableDepthMeters = depth?.toDouble()
+        refreshFit()
+    }
+
+    private fun enterMeasureSpace() {
+        renderer.setMode(InteractionMode.MEASURE_SPACE)
+        updateModeUi(InteractionMode.MEASURE_SPACE)
+        resultsPanel.visibility = View.GONE
+    }
+
+    private fun clearFitCheck() {
+        fitGeneration += 1
+        fitLookupInFlight = false
+        fitProduct = null
+        fitDimensions = null
+        fitPanel.visibility = View.GONE
     }
 
     private fun showAnalysisError(message: String) {
@@ -390,6 +479,7 @@ class MainActivity : Activity() {
     private fun updateModeUi(mode: InteractionMode) {
         measureButton.isEnabled = mode != InteractionMode.MEASURE
         previewButton.isEnabled = mode != InteractionMode.PREVIEW_PRODUCT
+        measureSpaceButton.isEnabled = mode != InteractionMode.MEASURE_SPACE
         rotationControls.visibility = if (mode == InteractionMode.PREVIEW_PRODUCT) View.VISIBLE else View.GONE
     }
 
@@ -430,4 +520,5 @@ data class TapEvent(val x: Float, val y: Float)
 enum class InteractionMode {
     MEASURE,
     PREVIEW_PRODUCT,
+    MEASURE_SPACE,
 }

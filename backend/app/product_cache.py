@@ -48,12 +48,25 @@ class ProductSearchCache:
             return CachedSearch(
                 query=str(entry["query"]),
                 provider=provider,
-                products=_PRODUCTS.validate_python(entry["products"]),
+                products=_products_with_refs(entry),
                 retrieved_at=datetime.fromisoformat(str(entry["retrievedAt"])),
             )
         except (KeyError, ValueError, ValidationError):
             logger.warning("Ignoring an unreadable product cache entry.")
             return None
+
+    def find_product(self, product_id: str) -> ProductCandidate | None:
+        """Looks up a product this backend previously returned from a live search."""
+        with self._lock:
+            entries = list(self._entries.values())
+        for entry in reversed(entries):  # Most recent first.
+            try:
+                for product in _products_with_refs(entry):
+                    if product.id == product_id:
+                        return product
+            except (KeyError, ValueError, ValidationError):
+                continue
+        return None
 
     def put(self, provider: str, cache_key: str, query: str, products: list[ProductCandidate]) -> None:
         if not products:
@@ -62,6 +75,8 @@ class ProductSearchCache:
             "query": query,
             "retrievedAt": datetime.now(timezone.utc).isoformat(),
             "products": _PRODUCTS.dump_python(products, mode="json"),
+            # Server-side provider references (excluded from the product JSON above).
+            "refs": {p.id: p.detailPageToken for p in products if p.detailPageToken},
         }
         with self._lock:
             key = _key(provider, cache_key)
@@ -100,6 +115,17 @@ class ProductSearchCache:
                     os.unlink(temp_name)
         except OSError:
             logger.warning("Could not persist the product cache; continuing without it.")
+
+
+def _products_with_refs(entry: dict[str, object]) -> list[ProductCandidate]:
+    products = _PRODUCTS.validate_python(entry["products"])
+    refs = entry.get("refs")
+    if not isinstance(refs, dict):
+        return products
+    return [
+        p.model_copy(update={"detailPageToken": refs[p.id]}) if isinstance(refs.get(p.id), str) else p
+        for p in products
+    ]
 
 
 def _key(provider: str, cache_key: str) -> str:

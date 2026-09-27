@@ -14,7 +14,11 @@ from .gemini_service import (
 )
 from .image_processing import InvalidImageError, prepare_image
 from .models import AnalyzeProductRequest, VisualProductAnalysis
+from .dimension_models import DimensionRequest, ResolvedDimensions
+from .dimension_resolver import DimensionResolver, ResolutionCache
+from .page_fetcher import HttpPageFetcher
 from .product_cache import ProductSearchCache
+from .product_details import SerpApiImmersiveProductDetailSource
 from .product_models import ProductSearchRequest, ProductSearchResponse
 from .product_providers import (
     ProductProviderMalformedResponseError,
@@ -40,6 +44,28 @@ def _product_cache(path: str) -> ProductSearchCache:
     return ProductSearchCache(path)
 
 
+@lru_cache
+def _resolution_cache() -> ResolutionCache:
+    return ResolutionCache()
+
+
+def get_product_cache(settings: Settings = Depends(get_settings)) -> ProductSearchCache:
+    return _product_cache(settings.product_cache_path)
+
+
+def get_dimension_resolver(settings: Settings = Depends(get_settings)) -> DimensionResolver:
+    return DimensionResolver(
+        SerpApiImmersiveProductDetailSource(
+            settings.serpapi_api_key, timeout_seconds=settings.serpapi_timeout_seconds
+        ),
+        HttpPageFetcher(timeout_seconds=settings.retailer_fetch_timeout_seconds),
+    )
+
+
+def get_resolution_cache() -> ResolutionCache:
+    return _resolution_cache()
+
+
 def get_product_search_service(
     settings: Settings = Depends(get_settings),
 ) -> ProductSearchService:
@@ -55,7 +81,7 @@ def get_product_search_service(
 def create_app() -> FastAPI:
     app = FastAPI(
         title="Spatial Commerce Visual Analysis",
-        version="0.4.0",
+        version="0.5.0",
         docs_url="/docs",
         redoc_url=None,
     )
@@ -129,6 +155,28 @@ def create_app() -> FastAPI:
                 code, detail = status.HTTP_502_BAD_GATEWAY, "Product search is temporarily unavailable. Please retry."
             logger.warning("Product search failed without cache: %s", type(exc.cause).__name__)
             raise HTTPException(status_code=code, detail=detail) from exc
+
+    @app.post("/api/v1/products/dimensions", response_model=ResolvedDimensions)
+    async def resolve_product_dimensions(
+        request: DimensionRequest,
+        cache: ProductSearchCache = Depends(get_product_cache),
+        resolver: DimensionResolver = Depends(get_dimension_resolver),
+        resolutions: ResolutionCache = Depends(get_resolution_cache),
+    ) -> ResolvedDimensions:
+        # Only products this backend itself returned from the provider are resolved;
+        # client-supplied URLs or dimensions are never trusted.
+        product = cache.find_product(request.productId)
+        if product is None or product.productUrl != request.productUrl:
+            raise HTTPException(
+                status_code=404,
+                detail="This product is no longer known to the backend. Search again and reselect it.",
+            )
+        cached = resolutions.get(product.id)
+        if cached is not None:
+            return cached
+        result = await resolver.resolve(product)
+        resolutions.put(result)
+        return result
 
     return app
 

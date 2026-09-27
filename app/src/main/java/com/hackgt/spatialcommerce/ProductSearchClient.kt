@@ -27,6 +27,19 @@ class ProductSearchClient(
         }
     }
 
+    /**
+     * Asks the backend for explicit dimensions of a product it previously returned.
+     * Only identifiers are sent; the backend never trusts client-supplied dimensions.
+     */
+    fun resolveDimensions(
+        product: ProductCandidate,
+        callback: (Result<ResolvedDimensions>) -> Unit,
+    ) {
+        executor.execute {
+            callback(runCatching { performDimensionRequest(product) })
+        }
+    }
+
     fun close() {
         executor.shutdownNow()
     }
@@ -72,6 +85,68 @@ class ProductSearchClient(
             )
         } catch (exception: Exception) {
             throw ProductSearchException("The product search response was invalid. Please retry.", exception)
+        } finally {
+            connection.disconnect()
+        }
+    }
+
+    private fun performDimensionRequest(product: ProductCandidate): ResolvedDimensions {
+        val body = JSONObject().apply {
+            put("productId", product.id)
+            put("productUrl", product.productUrl)
+        }
+        val json = postJson("/api/v1/products/dimensions", body, DIMENSION_READ_TIMEOUT_MS, "Dimension lookup")
+        val status = json.getString("status")
+        require(status in setOf("verified", "partial", "unavailable"))
+        return ResolvedDimensions(
+            productId = json.getString("productId"),
+            widthMeters = json.optionalDouble("widthMeters")?.takeIf { it > 0.0 },
+            depthMeters = json.optionalDouble("depthMeters")?.takeIf { it > 0.0 },
+            heightMeters = json.optionalDouble("heightMeters")?.takeIf { it > 0.0 },
+            status = status,
+            sourceType = json.optionalString("sourceType") ?: "unavailable",
+            sourceUrl = json.optionalString("sourceUrl"),
+            sourceName = json.optionalString("sourceName"),
+            rawDimensions = json.optionalString("rawDimensions"),
+            retryable = json.optBoolean("retryable", false),
+            message = json.optionalString("message"),
+        )
+    }
+
+    private fun postJson(path: String, payload: JSONObject, readTimeoutMs: Int, label: String): JSONObject {
+        val connection = (URL("$baseUrl$path").openConnection() as HttpURLConnection).apply {
+            requestMethod = "POST"
+            connectTimeout = CONNECT_TIMEOUT_MS
+            readTimeout = readTimeoutMs
+            doOutput = true
+            setRequestProperty("Content-Type", "application/json; charset=utf-8")
+            setRequestProperty("Accept", "application/json")
+        }
+        try {
+            connection.outputStream.bufferedWriter(Charsets.UTF_8).use { it.write(payload.toString()) }
+            val statusCode = connection.responseCode
+            val responseText = (if (statusCode in 200..299) connection.inputStream else connection.errorStream)
+                ?.bufferedReader(Charsets.UTF_8)
+                ?.use { it.readText().take(MAX_RESPONSE_CHARS) }
+                .orEmpty()
+            if (statusCode !in 200..299) {
+                val detail = runCatching { JSONObject(responseText).optString("detail") }.getOrNull()
+                throw ProductSearchException(
+                    detail?.takeIf { it.isNotBlank() } ?: "$label returned HTTP $statusCode. Please retry.",
+                )
+            }
+            return JSONObject(responseText)
+        } catch (exception: SocketTimeoutException) {
+            throw ProductSearchException("$label timed out. Check the connection and retry.", exception)
+        } catch (exception: ProductSearchException) {
+            throw exception
+        } catch (exception: IOException) {
+            throw ProductSearchException(
+                "Cannot reach the local backend. Start it, check adb reverse, and retry.",
+                exception,
+            )
+        } catch (exception: Exception) {
+            throw ProductSearchException("The $label response was invalid. Please retry.", exception)
         } finally {
             connection.disconnect()
         }
@@ -154,6 +229,7 @@ class ProductSearchClient(
         private const val MAX_RESULTS = 5
         private const val CONNECT_TIMEOUT_MS = 5_000
         private const val READ_TIMEOUT_MS = 25_000
+        private const val DIMENSION_READ_TIMEOUT_MS = 45_000
         private const val MAX_RESPONSE_CHARS = 200_000
     }
 }

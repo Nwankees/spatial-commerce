@@ -28,11 +28,15 @@ class ArRenderer(
     private val onInfo: (String) -> Unit,
     private val onCameraFrame: (CapturedCameraFrame) -> Unit,
     private val onCameraCaptureError: (String) -> Unit,
+    /** Available width/depth in meters (null = not measured yet). Called on the GL thread. */
+    private val onSpaceMeasured: (Float?, Float?) -> Unit,
 ) : GLSurfaceView.Renderer {
     private val backgroundRenderer = CameraBackgroundRenderer()
     private val boxRenderer = BoxRenderer()
     private val productRenderer = ProductRenderer(boxRenderer)
     private val measurementAnchors = mutableListOf<Anchor>()
+    // Measure-space mode: [widthA, widthB, depthA, depthB], same ARCore hit points as Measure.
+    private val spaceAnchors = mutableListOf<Anchor>()
     private var productAnchor: Anchor? = null
     private var session: Session? = null
     @Volatile
@@ -62,12 +66,19 @@ class ArRenderer(
 
     fun setMode(newMode: InteractionMode) {
         mode = newMode
-        if (newMode == InteractionMode.MEASURE) {
-            forcePublishInfo(if (measurementAnchors.size == 2) formatDistance(distanceMeters(measurementAnchors[0], measurementAnchors[1])) else "Tap two points")
-            publishStatus(measurementPrompt())
-        } else {
-            forcePublishInfo(product.overlayText())
-            publishStatus(previewPrompt())
+        when (newMode) {
+            InteractionMode.MEASURE -> {
+                forcePublishInfo(if (measurementAnchors.size == 2) formatDistance(distanceMeters(measurementAnchors[0], measurementAnchors[1])) else "Tap two points")
+                publishStatus(measurementPrompt())
+            }
+            InteractionMode.PREVIEW_PRODUCT -> {
+                forcePublishInfo(product.overlayText())
+                publishStatus(previewPrompt())
+            }
+            InteractionMode.MEASURE_SPACE -> {
+                forcePublishInfo(spaceInfoText())
+                publishStatus(spacePrompt())
+            }
         }
     }
 
@@ -78,12 +89,19 @@ class ArRenderer(
 
     fun reset() {
         resetPending = true
-        if (mode == InteractionMode.MEASURE) {
-            publishInfo("Tap two points")
-            publishStatus(measurementPrompt(0))
-        } else {
-            publishInfo(product.overlayText())
-            publishStatus(previewPrompt(false))
+        when (mode) {
+            InteractionMode.MEASURE -> {
+                publishInfo("Tap two points")
+                publishStatus(measurementPrompt(0))
+            }
+            InteractionMode.PREVIEW_PRODUCT -> {
+                publishInfo(product.overlayText())
+                publishStatus(previewPrompt(false))
+            }
+            InteractionMode.MEASURE_SPACE -> {
+                publishInfo(spaceInfoText(0))
+                publishStatus(spacePrompt(0))
+            }
         }
     }
 
@@ -149,6 +167,14 @@ class ArRenderer(
             measurementAnchors.forEachIndexed { index, anchor ->
                 if (anchor.trackingState == TrackingState.TRACKING) {
                     val color = if (index == 0) FIRST_MARKER_COLOR else SECOND_MARKER_COLOR
+                    boxRenderer.drawCube(anchor.pose, viewMatrix, projectionMatrix, 0.035f, color, liftByHalf = true)
+                }
+            }
+        }
+        if (mode == InteractionMode.MEASURE_SPACE) {
+            spaceAnchors.forEachIndexed { index, anchor ->
+                if (anchor.trackingState == TrackingState.TRACKING) {
+                    val color = if (index < 2) SPACE_WIDTH_COLOR else SPACE_DEPTH_COLOR
                     boxRenderer.drawCube(anchor.pose, viewMatrix, projectionMatrix, 0.035f, color, liftByHalf = true)
                 }
             }
@@ -229,6 +255,19 @@ class ArRenderer(
                     publishStatus("First point placed. Tap the second physical point.")
                 }
             }
+            InteractionMode.MEASURE_SPACE -> {
+                if (spaceAnchors.size >= 4) {
+                    publishStatus("Space measured. Tap Reset to measure it again.")
+                    return
+                }
+                spaceAnchors += hit.createAnchor()
+                publishInfo(spaceInfoText())
+                publishStatus(spacePrompt())
+                when (spaceAnchors.size) {
+                    2 -> onSpaceMeasured(spaceWidthMeters(), null)
+                    4 -> onSpaceMeasured(spaceWidthMeters(), spaceDepthMeters())
+                }
+            }
             InteractionMode.PREVIEW_PRODUCT -> {
                 val productHit = frame.hitTest(tap.x, tap.y).firstOrNull { result ->
                     val plane = result.trackable as? Plane
@@ -251,6 +290,10 @@ class ArRenderer(
     private fun clearAnchors() {
         measurementAnchors.forEach(Anchor::detach)
         measurementAnchors.clear()
+        val hadSpace = spaceAnchors.isNotEmpty()
+        spaceAnchors.forEach(Anchor::detach)
+        spaceAnchors.clear()
+        if (hadSpace) onSpaceMeasured(null, null)
         productAnchor?.detach()
         productAnchor = null
         productPlaced = false
@@ -266,6 +309,29 @@ class ArRenderer(
         val dy = a[1] - b[1]
         val dz = a[2] - b[2]
         return sqrt(dx * dx + dy * dy + dz * dz)
+    }
+
+    private fun spaceWidthMeters(): Float? =
+        if (spaceAnchors.size >= 2) distanceMeters(spaceAnchors[0], spaceAnchors[1]) else null
+
+    private fun spaceDepthMeters(): Float? =
+        if (spaceAnchors.size >= 4) distanceMeters(spaceAnchors[2], spaceAnchors[3]) else null
+
+    private fun spaceInfoText(count: Int = spaceAnchors.size): String {
+        val width = if (count >= 2) spaceWidthMeters()?.let { String.format(Locale.US, "%.2f m", it) } else null
+        val depth = if (count >= 4) spaceDepthMeters()?.let { String.format(Locale.US, "%.2f m", it) } else null
+        return "Available width: ${width ?: "not measured"}\nAvailable depth: ${depth ?: "not measured"}"
+    }
+
+    private fun spacePrompt(count: Int = spaceAnchors.size): String {
+        val depth = if (depthSupported) "Depth: ON" else "Depth: unavailable"
+        return when (count) {
+            0 -> "$depth  •  Measure space: tap the LEFT edge of the available width."
+            1 -> "$depth  •  Tap the RIGHT edge of the available width."
+            2 -> "$depth  •  Width recorded. Tap the FRONT edge of the available depth."
+            3 -> "$depth  •  Tap the BACK edge of the available depth."
+            else -> "$depth  •  Available space recorded. Reset to measure again."
+        }
     }
 
     private fun formatDistance(meters: Float): String = if (meters < 1f) {
@@ -314,6 +380,8 @@ class ArRenderer(
     companion object {
         private val FIRST_MARKER_COLOR = floatArrayOf(0.18f, 0.82f, 1f, 1f)
         private val SECOND_MARKER_COLOR = floatArrayOf(1f, 0.35f, 0.55f, 1f)
+        private val SPACE_WIDTH_COLOR = floatArrayOf(1f, 0.78f, 0.18f, 1f)
+        private val SPACE_DEPTH_COLOR = floatArrayOf(0.35f, 0.9f, 0.45f, 1f)
         private const val MAX_CAMERA_CAPTURE_ATTEMPTS = 90
     }
 }
