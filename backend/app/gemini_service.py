@@ -8,17 +8,21 @@ from pydantic import ValidationError
 
 from .models import VisualProductAnalysis
 from .settings import Settings
+from .vision_errors import VisionMalformedResponseError, VisionNotConfiguredError, VisionUnavailableError
+
+# Milestone 5.5: Gemini is no longer on the active analysis path (see ollama_vision.py).
+# This module is kept isolated and unused; its errors map onto the provider-neutral ones.
 
 
-class GeminiNotConfiguredError(RuntimeError):
+class GeminiNotConfiguredError(VisionNotConfiguredError):
     pass
 
 
-class GeminiUpstreamError(RuntimeError):
+class GeminiUpstreamError(VisionUnavailableError):
     pass
 
 
-class GeminiMalformedResponseError(RuntimeError):
+class GeminiMalformedResponseError(VisionMalformedResponseError):
     pass
 
 

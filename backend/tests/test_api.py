@@ -51,7 +51,9 @@ def test_health_does_not_require_a_secret() -> None:
     response = TestClient(app).get("/health")
     assert response.status_code == 200
     assert response.json()["status"] == "ok"
-    assert "geminiConfigured" in response.json()
+    # Milestone 5.5: local vision (Ollama) replaced Gemini on the active path.
+    assert response.json()["vision"]["provider"] == "ollama"
+    assert "reachable" in response.json()["vision"]
 
 
 def test_analyze_returns_typed_structured_result() -> None:

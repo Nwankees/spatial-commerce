@@ -22,6 +22,8 @@ logger = logging.getLogger(__name__)
 class StoreLink:
     name: str | None
     url: str
+    title: str | None = None
+    price: float | None = None
 
 
 @dataclass(frozen=True)
@@ -30,6 +32,8 @@ class ProductDetail:
 
     features: list[tuple[str, str]] = field(default_factory=list)
     stores: list[StoreLink] = field(default_factory=list)
+    # Options SerpApi explicitly marks as selected (variants[].items[].selected == true).
+    selected_options: dict[str, str] = field(default_factory=dict)
     source_name: str = "provider product details"
 
 
@@ -100,6 +104,7 @@ class SerpApiImmersiveProductDetailSource:
         return ProductDetail(
             features=_features(product.get("about_the_product")),
             stores=_stores(product.get("stores")),
+            selected_options=_selected_options(product.get("variants")),
             source_name="Google Shopping product details (via SerpApi)",
         )
 
@@ -123,5 +128,21 @@ def _stores(stores: Any) -> list[StoreLink]:
     for store in stores:
         if isinstance(store, dict) and isinstance(store.get("link"), str):
             name = store.get("name") if isinstance(store.get("name"), str) else None
-            links.append(StoreLink(name, store["link"]))
+            title = store.get("title") if isinstance(store.get("title"), str) else None
+            price = store.get("extracted_price")
+            price = float(price) if isinstance(price, (int, float)) and not isinstance(price, bool) else None
+            links.append(StoreLink(name, store["link"], title, price))
     return links
+
+
+def _selected_options(variants: Any) -> dict[str, str]:
+    selected: dict[str, str] = {}
+    if not isinstance(variants, list):
+        return selected
+    for group in variants:
+        if not isinstance(group, dict) or not isinstance(group.get("title"), str):
+            continue
+        chosen = [i.get("name") for i in group.get("items") or [] if isinstance(i, dict) and i.get("selected") is True]
+        if len(chosen) == 1 and isinstance(chosen[0], str) and not chosen[0].lower().startswith("any "):
+            selected[group["title"]] = chosen[0]
+    return selected

@@ -10,7 +10,8 @@ From `backend/`:
 python -m venv .venv
 .venv\Scripts\python -m pip install -r requirements-dev.txt
 Copy-Item .env.example .env
-# Put the HackGT Gemini key and the SerpApi key in .env (never commit this file).
+# Put the SerpApi key in .env (never commit this file). Vision runs locally in Ollama:
+#   ollama pull qwen3-vl:30b   (OLLAMA_MODEL / OLLAMA_BASE_URL are configurable)
 .venv\Scripts\python -m uvicorn app.main:app --host 127.0.0.1 --port 8000
 ```
 
@@ -21,6 +22,14 @@ adb reverse tcp:8000 tcp:8000
 ```
 
 The debug Android app then reaches the service at `http://127.0.0.1:8000` through the USB connection.
+
+## Local vision (Milestone 5.5)
+
+`POST /api/v1/analyze` calls Ollama's `/api/chat` with `stream: false`, `think: false`, and the `VisualProductAnalysis` JSON schema as `format`. `/health` reports `vision.reachable` and `vision.modelInstalled`. Gemini code remains in `app/gemini_service.py` but is unused.
+
+## Dimension extraction model
+
+Retailer-page dimension extraction uses a second, text-only Ollama model: `ollama pull qwen3:4b-instruct` (`OLLAMA_DIMENSION_MODEL`). It only runs when structured sources lack width and depth; its output is validated deterministically against the page text before use (see the main README). Test a page with `.venv\Scripts\python ..\tmp\m5_5_dimension_check.py <retailer URL>`.
 
 ## Product search
 

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import AliasChoices, BaseModel, ConfigDict, Field, field_validator
 
 
 class AnalyzeProductRequest(BaseModel):
@@ -21,63 +21,112 @@ class AnalyzeProductRequest(BaseModel):
         normalized = value.strip()
         return normalized or None
 
-class VisualProductAnalysis(BaseModel):
+def _clean_list(values: list[str]) -> list[str]:
+    cleaned: list[str] = []
+    seen: set[str] = set()
+    for value in values:
+        normalized = " ".join(value.split())
+        if normalized and normalized.lower() not in seen:
+            seen.add(normalized.lower())
+            cleaned.append(normalized)
+    return cleaned
+
+
+def _clean_optional(value: str | None) -> str | None:
+    if value is None:
+        return None
+    normalized = " ".join(value.split())
+    return normalized or None
+
+
+class Hypothesis(BaseModel):
+    """An uncertain identification (e.g. a brand) with the model's confidence."""
+
     model_config = ConfigDict(extra="forbid")
+
+    value: str = Field(min_length=1, max_length=80)
+    confidence: float = Field(ge=0.0, le=1.0)
+    evidence: Literal["visible_text", "logo", "design_resemblance"] = Field(
+        description="visible_text/logo when printed on the product; design_resemblance when only the look suggests it."
+    )
+
+    @field_validator("value")
+    @classmethod
+    def clean_value(cls, value: str) -> str:
+        return " ".join(value.split())
+
+
+class VisibleSpecification(BaseModel):
+    """A specification printed/visible on the product. Never inferred."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    name: str = Field(min_length=1, max_length=60)
+    value: str = Field(min_length=1, max_length=80)
+    evidence: str = Field(min_length=1, max_length=160, description="The visible text or feature that shows it.")
+
+
+class VisualProductAnalysis(BaseModel):
+    """Conservative, typed description of the product in view, built for shopping retrieval.
+
+    Uncertain identifications are expressed as Hypothesis objects with a
+    confidence; unknown fields stay null/empty rather than being guessed.
+    """
+
+    model_config = ConfigDict(extra="forbid", populate_by_name=True)
 
     objectDetected: bool = Field(
         description="Whether a principal, potentially shoppable physical object is clearly visible."
     )
-    category: str | None = Field(
-        default=None,
-        description="Broad product category, such as chair or table.",
-    )
+    category: str | None = Field(default=None, max_length=80, description="Broad category, e.g. chair, laptop charger.")
     subcategory: str | None = Field(
-        default=None,
-        description="More specific product type, such as accent chair.",
+        default=None, max_length=80, description="Specific product type, e.g. accent chair, USB-C wall charger."
     )
-    color: str | None = Field(
-        default=None,
-        description="Dominant visible product color.",
+    brand: Hypothesis | None = Field(default=None, description="Brand only if a logo/text or strong design cue supports it.")
+    modelFamily: Hypothesis | None = Field(
+        default=None, description="Product line/family (not an exact model number unless printed)."
     )
-    materials: list[str] = Field(
-        default_factory=list,
-        max_length=8,
-        description="Likely visible materials. Do not invent hidden materials.",
+    visibleText: list[str] = Field(
+        default_factory=list, max_length=10, description="Legible text/logos exactly as printed on the product."
     )
-    style: list[str] = Field(
-        default_factory=list,
-        max_length=8,
-        description="Short visual style descriptors.",
+    color: str | None = Field(default=None, max_length=60, description="Dominant visible product color.")
+    materials: list[str] = Field(default_factory=list, max_length=8, description="Apparent materials only.")
+    style: list[str] = Field(default_factory=list, max_length=8, description="Short visual style descriptors.")
+    shape: str | None = Field(default=None, max_length=120, description="Form factor / dominant shape.")
+    distinctiveFeatures: list[str] = Field(
+        default_factory=list, max_length=8, description="Visually distinguishing features useful for finding it."
     )
-    shape: str | None = Field(
-        default=None,
-        description="Concise description of the product's dominant shape.",
+    visibleSpecifications: list[VisibleSpecification] = Field(
+        default_factory=list, max_length=6, description="Only specs printed or plainly visible on the product."
     )
-    searchKeywords: list[str] = Field(
+    searchQueries: list[str] = Field(
         default_factory=list,
         max_length=6,
-        description="Two to six concise shopping-search phrases grounded in the image.",
+        validation_alias=AliasChoices("searchQueries", "searchKeywords"),
+        description="Two to six diverse shopping-search queries, most specific first.",
     )
-    confidence: float = Field(ge=0.0, le=1.0)
+    confidence: float = Field(ge=0.0, le=1.0, description="Confidence in the product identification overall.")
+    uncertaintyNotes: str | None = Field(default=None, max_length=300, description="What is uncertain, briefly.")
     message: str | None = Field(
-        default=None,
-        description="Brief explanation only when no suitable product is detected.",
+        default=None, max_length=300, description="Brief explanation only when no suitable product is detected."
     )
 
-    @field_validator("materials", "style", "searchKeywords")
+    @field_validator("materials", "style", "distinctiveFeatures", "visibleText")
     @classmethod
     def clean_string_lists(cls, values: list[str]) -> list[str]:
-        cleaned: list[str] = []
-        for value in values:
-            normalized = value.strip()
-            if normalized and normalized not in cleaned:
-                cleaned.append(normalized)
-        return cleaned
+        return _clean_list(values)
 
-    @field_validator("category", "subcategory", "color", "shape", "message")
+    @field_validator("searchQueries")
+    @classmethod
+    def clean_queries(cls, values: list[str]) -> list[str]:
+        return [query[:120] for query in _clean_list(values)]
+
+    @field_validator("category", "subcategory", "color", "shape", "message", "uncertaintyNotes")
     @classmethod
     def clean_optional_strings(cls, value: str | None) -> str | None:
-        if value is None:
-            return None
-        normalized = value.strip()
-        return normalized or None
+        return _clean_optional(value)
+
+    @property
+    def searchKeywords(self) -> list[str]:
+        """Milestone 3/4 name for ``searchQueries``."""
+        return self.searchQueries

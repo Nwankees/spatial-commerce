@@ -16,6 +16,7 @@ from .product_providers import (
     ProductProviderUnavailableError,
 )
 from .query_builder import ProductQuery
+from .variant_context import parse_google_ids
 
 logger = logging.getLogger(__name__)
 # httpx logs full request URLs at INFO, and SerpApi takes the key as a query
@@ -124,9 +125,12 @@ class SerpApiProductSearchProvider:
                 continue
             # Near-identical listings (same title from the same seller) crowd out
             # variety in a five-result list; keep the provider's highest-ranked one.
+            # Same title+seller only dedupes when the Google offer identity also matches
+            # (or is absent on both): distinct offers/variants are never merged.
+            offer = parse_google_ids(candidate.productUrl).get("headlineOfferDocid", "")
             listing_key = "listing:" + " ".join(candidate.title.lower().split()) + "|" + (
                 (candidate.retailer or "").lower()
-            )
+            ) + "|" + offer
             keys = (candidate.providerProductId, candidate.productUrl, listing_key)
             if any(key in seen for key in keys):
                 continue

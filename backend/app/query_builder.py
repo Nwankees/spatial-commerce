@@ -80,3 +80,46 @@ def _truncate(text: str) -> str:
     if len(text) <= _MAX_QUERY_CHARS:
         return text
     return text[:_MAX_QUERY_CHARS].rsplit(" ", 1)[0]
+
+
+class QueryPlanner:
+    """Chooses the capped set of searches for one analysis (Milestone 5.5).
+
+    Order: the vision model's own searchQueries (most specific first), then the
+    deterministic ProductQueryBuilder query as a structured fallback. Queries are
+    normalized, near-duplicates removed, and the list is capped for latency and
+    provider cost. Guessed specs are not added here; the planner only reuses
+    what the (already sanitized) analysis contains.
+    """
+
+    def __init__(self, max_queries: int = 3, builder: ProductQueryBuilder | None = None) -> None:
+        if max_queries < 1:
+            raise ValueError("max_queries must be at least 1")
+        self._max_queries = max_queries
+        self._builder = builder or ProductQueryBuilder()
+
+    def plan(self, analysis: VisualProductAnalysis) -> list[ProductQuery]:
+        if not analysis.objectDetected:
+            raise QueryBuildError("The analysis did not detect a product to search for.")
+        planned: list[ProductQuery] = []
+        seen: set[frozenset[str]] = set()
+
+        def add(text: str) -> None:
+            cleaned = _truncate(" ".join(text.split()))
+            words = frozenset(normalize_query(cleaned).split())
+            if len(planned) >= self._max_queries or len(words) < 1 or words in seen:
+                return
+            if len(normalize_query(cleaned).split()) > 12:
+                return  # Overlong queries destroy recall.
+            seen.add(words)
+            planned.append(ProductQuery(cleaned))
+
+        for query in analysis.searchQueries:
+            add(query)
+        try:
+            add(self._builder.build(analysis).text)
+        except QueryBuildError:
+            pass
+        if not planned:
+            raise QueryBuildError("The analysis has no product type or search queries.")
+        return planned

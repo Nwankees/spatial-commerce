@@ -206,17 +206,28 @@ def test_serpapi_missing_key() -> None:
 # ---- Service: live, cache fallback, failure -----------------------------
 
 class SequenceProvider:
+    """Returns the same outcome for every query of one request, then the next outcome.
+
+    Milestone 5.5 runs several queries per request; each request consumes one outcome.
+    """
+
     name = "serpapi"
 
     def __init__(self, *outcomes: Any) -> None:
         self._outcomes = list(outcomes)
+        self._current: Any = None
 
     @property
     def configured(self) -> bool:
         return True
 
+    def next_request(self) -> None:
+        self._current = self._outcomes.pop(0)
+
     async def search(self, query, limit):
-        outcome = self._outcomes.pop(0)
+        if self._current is None:
+            self.next_request()
+        outcome = self._current
         if isinstance(outcome, Exception):
             raise outcome
         return outcome
@@ -237,6 +248,7 @@ def test_provider_failure_with_cache_hit_is_labeled_cached(tmp_path: Path) -> No
 
     live = run(service.search(chair_analysis(), 5))
     assert live.resultSource == "live" and live.cachedAt is None
+    assert len(live.queries) == 3 and all(q.status == "ok" for q in live.queries)
 
     # A fresh cache instance proves the result was persisted to disk.
     service = ProductSearchService(
@@ -293,7 +305,10 @@ def test_endpoint_returns_live_products(tmp_path: Path) -> None:
     response = post_search(service, {"analysis": chair_analysis().model_dump()})
     assert response.status_code == 200
     body = response.json()
-    assert body["query"] == "beige modern fabric accent chair"
+    # Milestone 5.5: the model's queries run first, then the deterministic query.
+    assert body["query"] == "beige modern lounge chair"
+    assert [q["query"] for q in body["queries"]] == [
+        "beige modern lounge chair", "rounded fabric accent chair", "beige modern fabric accent chair"]
     assert body["provider"] == "serpapi"
     assert body["resultSource"] == "live"
     assert len(body["products"]) == 3

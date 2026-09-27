@@ -49,9 +49,18 @@ data class ProductSearchResult(
     val cachedAt: String?,
     val products: List<ProductCandidate>,
     val message: String?,
+    /** Every search the backend ran for this request (Milestone 5.5 multi-query retrieval). */
+    val queries: List<QueryOutcome> = emptyList(),
 ) {
     val isCached: Boolean get() = resultSource == "cache"
 }
+
+data class QueryOutcome(
+    val query: String,
+    /** "ok", "empty", or "failed". */
+    val status: String,
+    val resultCount: Int,
+)
 
 /** Dimensions of the selected product, resolved by the backend from explicit source data only. */
 data class ResolvedDimensions(

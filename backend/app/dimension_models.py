@@ -5,7 +5,9 @@ from typing import Literal
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 DimensionStatus = Literal["verified", "partial", "unavailable"]
-DimensionSourceType = Literal["json_ld", "structured_metadata", "spec_table", "page_text", "unavailable"]
+DimensionSourceType = Literal[
+    "json_ld", "structured_metadata", "spec_table", "page_text_llm", "page_text", "unavailable"
+]
 
 
 class ResolvedDimensions(BaseModel):
@@ -27,6 +29,11 @@ class ResolvedDimensions(BaseModel):
     sourceUrl: str | None = None
     sourceName: str | None = Field(default=None, description="Human-readable source, e.g. a retailer name.")
     rawDimensions: str | None = Field(default=None, description="The source text the values were parsed from.")
+    variantScope: Literal["exact_variant", "exact_variant_page", "product_family", "retailer_page"] | None = Field(
+        default=None,
+        description="Whether the values describe the exact selected variant or the product family.",
+    )
+    variantIdentity: str | None = Field(default=None, description="The retailer identity used for an exact-variant result.")
     retryable: bool = False
     message: str | None = None
 
@@ -41,6 +48,8 @@ class ResolvedDimensions(BaseModel):
             self.status = "unavailable"
             self.sourceType = "unavailable"
             self.rawDimensions = None
+            self.variantScope = None
+            self.variantIdentity = None
         if self.status != "unavailable":
             self.retryable = False
         return self

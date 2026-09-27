@@ -320,7 +320,7 @@ class MainActivity : Activity() {
     private fun onCameraFrameCaptured(frame: CapturedCameraFrame) {
         runOnUiThread {
             analyzeButton.text = "Analyzing…"
-            infoText.text = "Gemini is identifying the principal product and its visible attributes."
+            infoText.text = "The local vision model is identifying the product. This can take a while on first use."
             statusText.text = "Analyzing object…"
         }
         backendClient.analyze(frame) { result ->

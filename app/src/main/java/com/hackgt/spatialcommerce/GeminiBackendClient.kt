@@ -10,6 +10,10 @@ import java.net.URL
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
 
+/**
+ * Client for the backend's /api/v1/analyze endpoint. Since Milestone 5.5 the backend runs a
+ * local Ollama vision model; the class name is kept to avoid churn.
+ */
 class GeminiBackendClient(
     private val baseUrl: String = "http://127.0.0.1:8000",
 ) {
@@ -88,14 +92,25 @@ class GeminiBackendClient(
             objectDetected = json.getBoolean("objectDetected"),
             category = json.optionalString("category"),
             subcategory = json.optionalString("subcategory"),
+            brand = json.optJSONObject("brand")?.toHypothesis(),
+            modelFamily = json.optJSONObject("modelFamily")?.toHypothesis(),
+            visibleText = json.optJSONArray("visibleText").toStringList(),
             color = json.optionalString("color"),
             materials = json.optJSONArray("materials").toStringList(),
             style = json.optJSONArray("style").toStringList(),
             shape = json.optionalString("shape"),
-            searchKeywords = json.optJSONArray("searchKeywords").toStringList(),
+            distinctiveFeatures = json.optJSONArray("distinctiveFeatures").toStringList(),
+            searchQueries = (json.optJSONArray("searchQueries") ?: json.optJSONArray("searchKeywords")).toStringList(),
             confidence = confidence,
             message = json.optionalString("message"),
+            rawJson = json.toString(),
         )
+    }
+
+    private fun JSONObject.toHypothesis(): Hypothesis? {
+        val value = optionalString("value") ?: return null
+        val confidence = optDouble("confidence").takeIf { !it.isNaN() && it in 0.0..1.0 } ?: return null
+        return Hypothesis(value, confidence, optionalString("evidence") ?: "design_resemblance")
     }
 
     private fun JSONObject.optionalString(key: String): String? {
@@ -117,7 +132,8 @@ class GeminiBackendClient(
 
     companion object {
         private const val CONNECT_TIMEOUT_MS = 5_000
-        private const val READ_TIMEOUT_MS = 50_000
+        // Local vision on a large model can take well over a minute on first load.
+        private const val READ_TIMEOUT_MS = 190_000
         private const val MAX_RESPONSE_CHARS = 100_000
     }
 }

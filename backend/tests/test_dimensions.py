@@ -210,8 +210,19 @@ def test_provider_features_resolve_partial_dimensions() -> None:
     assert "Width: 40 in wide" in result.rawDimensions
 
 
-def test_jsonld_on_retailer_page_outranks_provider_features() -> None:
+def test_provider_structured_specs_take_priority_and_skip_page_fetch() -> None:
+    # Milestone 5 follow-up hierarchy: provider product-detail specs rank first.
     detail = ProductDetail(features=[("Width", "38 in"), ("Depth", "37 in"), ("Height", "33.5\"")],
+                           stores=[StoreLink("Wayfair", STORE)], source_name="provider")
+    fetcher = FakeFetcher({STORE: page("", jsonld({"@type": "Product", "width": "39 in", "depth": "36 in"}))})
+    result = run(DimensionResolver(FakeDetailSource(detail), fetcher).resolve(candidate()))
+    assert result.status == "verified" and result.sourceType == "structured_metadata"
+    assert result.widthMeters == pytest.approx(38 * IN) and result.sourceName == "provider"
+    assert fetcher.requested == []  # width+depth already known: no retailer fetch
+
+
+def test_jsonld_used_when_provider_lacks_footprint() -> None:
+    detail = ProductDetail(features=[("Height", "34 in")],
                            stores=[StoreLink("Other", "https://other.example.com/p"), StoreLink("Wayfair", STORE)])
     html = page("", jsonld({"@type": "Product", "width": "39 in", "depth": "36 in", "height": "34 in"}))
     fetcher = FakeFetcher({STORE: html, "https://other.example.com/p": PageFetchError("blocked", retryable=False)})

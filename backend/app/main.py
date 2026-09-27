@@ -1,20 +1,21 @@
 from __future__ import annotations
 
-import asyncio
 import logging
+import time
 from functools import lru_cache
 
-from fastapi import Depends, FastAPI, HTTPException, status
+from fastapi import Depends, FastAPI, HTTPException, Response, status
 
-from .gemini_service import (
-    GeminiAnalysisService,
-    GeminiMalformedResponseError,
-    GeminiNotConfiguredError,
-    GeminiUpstreamError,
+from .ollama_vision import OllamaVisionService, ollama_health
+from .vision_errors import (
+    VisionMalformedResponseError,
+    VisionNotConfiguredError,
+    VisionUnavailableError,
 )
 from .image_processing import InvalidImageError, prepare_image
 from .models import AnalyzeProductRequest, VisualProductAnalysis
 from .dimension_models import DimensionRequest, ResolvedDimensions
+from .dimension_llm import OllamaDimensionExtractor
 from .dimension_resolver import DimensionResolver, ResolutionCache
 from .page_fetcher import HttpPageFetcher
 from .product_cache import ProductSearchCache
@@ -26,17 +27,31 @@ from .product_providers import (
     ProductProviderTimeoutError,
 )
 from .product_search_service import ProductSearchFailedError, ProductSearchService
-from .query_builder import QueryBuildError
+from .query_builder import QueryBuildError, QueryPlanner
 from .serpapi_provider import SerpApiProductSearchProvider
 from .settings import Settings, get_settings
 
 logger = logging.getLogger(__name__)
+_app_logger = logging.getLogger("app")
+if not _app_logger.handlers:
+    # Surface local-vision timing logs next to uvicorn's output without a telemetry service.
+    _handler = logging.StreamHandler()
+    _handler.setFormatter(logging.Formatter("%(levelname)s:     %(name)s: %(message)s"))
+    _app_logger.addHandler(_handler)
+    _app_logger.setLevel(logging.INFO)
+    _app_logger.propagate = False
 
 
 def get_analysis_service(
     settings: Settings = Depends(get_settings),
-) -> GeminiAnalysisService:
-    return GeminiAnalysisService(settings)
+) -> OllamaVisionService:
+    return OllamaVisionService(
+        settings.ollama_base_url,
+        settings.ollama_model,
+        timeout_seconds=settings.ollama_timeout_seconds,
+        keep_alive=settings.ollama_keep_alive,
+        min_confidence=settings.vision_min_confidence,
+    )
 
 
 @lru_cache
@@ -59,6 +74,13 @@ def get_dimension_resolver(settings: Settings = Depends(get_settings)) -> Dimens
             settings.serpapi_api_key, timeout_seconds=settings.serpapi_timeout_seconds
         ),
         HttpPageFetcher(timeout_seconds=settings.retailer_fetch_timeout_seconds),
+        extractor=OllamaDimensionExtractor(
+            settings.ollama_base_url,
+            settings.ollama_dimension_model,
+            timeout_seconds=settings.ollama_dimension_timeout_seconds,
+            keep_alive=settings.ollama_keep_alive,
+        ) if settings.dimension_llm_enabled else None,
+        evidence_max_chars=settings.dimension_evidence_max_chars,
     )
 
 
@@ -75,58 +97,79 @@ def get_product_search_service(
         country=settings.serpapi_country,
         language=settings.serpapi_language,
     )
-    return ProductSearchService(provider, _product_cache(settings.product_cache_path))
+    return ProductSearchService(
+        provider,
+        _product_cache(settings.product_cache_path),
+        planner=QueryPlanner(max_queries=settings.product_search_max_queries),
+        results_per_query=settings.product_search_results_per_query,
+    )
 
 
 def create_app() -> FastAPI:
     app = FastAPI(
         title="Spatial Commerce Visual Analysis",
-        version="0.5.0",
+        version="0.5.5",
         docs_url="/docs",
         redoc_url=None,
     )
 
     @app.get("/health")
     async def health(settings: Settings = Depends(get_settings)) -> dict[str, object]:
+        vision = await ollama_health(settings.ollama_base_url, settings.ollama_model)
+        dimension = await ollama_health(settings.ollama_base_url, settings.ollama_dimension_model)
         return {
             "status": "ok",
-            "geminiConfigured": bool(settings.gemini_api_key),
-            "model": settings.gemini_model,
+            "vision": {
+                "provider": "ollama",
+                "baseUrl": settings.ollama_base_url,
+                "model": settings.ollama_model,
+                **vision,
+            },
+            "dimensionModel": {
+                "model": settings.ollama_dimension_model,
+                "enabled": settings.dimension_llm_enabled,
+                "installed": dimension.get("modelInstalled", False),
+            },
             "productSearchConfigured": bool(settings.serpapi_api_key),
         }
 
     @app.post("/api/v1/analyze", response_model=VisualProductAnalysis)
     async def analyze_product(
         request: AnalyzeProductRequest,
+        response: Response,
         settings: Settings = Depends(get_settings),
-        service: GeminiAnalysisService = Depends(get_analysis_service),
+        service: OllamaVisionService = Depends(get_analysis_service),
     ) -> VisualProductAnalysis:
+        started = time.monotonic()
         try:
             image_bytes = prepare_image(request, settings.max_image_bytes)
-            return await service.analyze(image_bytes, request.userRequest)
+            result = await service.analyze(image_bytes, request.userRequest)
+            response.headers["X-Vision-Model"] = settings.ollama_model
+            response.headers["X-Analysis-Duration-Ms"] = str(int((time.monotonic() - started) * 1000))
+            return result
         except InvalidImageError as exc:
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
-        except GeminiNotConfiguredError as exc:
+        except VisionNotConfiguredError as exc:
             raise HTTPException(
                 status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-                detail="Gemini is not configured on the backend.",
+                detail="Local vision is not configured on the backend.",
             ) from exc
-        except asyncio.TimeoutError as exc:
+        except TimeoutError as exc:  # includes VisionTimeoutError and asyncio timeouts
             raise HTTPException(
                 status_code=status.HTTP_504_GATEWAY_TIMEOUT,
-                detail="Gemini analysis timed out. Please retry.",
+                detail="Local vision analysis timed out. Please retry.",
             ) from exc
-        except GeminiMalformedResponseError as exc:
-            logger.warning("Gemini returned malformed structured output", exc_info=True)
+        except VisionMalformedResponseError as exc:
+            logger.warning("Vision model returned unusable output: %s", exc)
             raise HTTPException(
                 status_code=status.HTTP_502_BAD_GATEWAY,
-                detail="Gemini returned an invalid structured response. Please retry.",
+                detail=f"{exc} Please retry.",
             ) from exc
-        except GeminiUpstreamError as exc:
-            logger.warning("Gemini request failed", exc_info=True)
+        except VisionUnavailableError as exc:
+            logger.warning("Vision request failed: %s", exc)
             raise HTTPException(
                 status_code=status.HTTP_502_BAD_GATEWAY,
-                detail="Gemini analysis failed. Please retry.",
+                detail=f"{exc} Please retry.",
             ) from exc
 
     @app.post("/api/v1/products/search", response_model=ProductSearchResponse)

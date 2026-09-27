@@ -66,6 +66,9 @@ class ProductCandidate(BaseModel):
     rating: float | None = Field(default=None, ge=0, le=5)
     reviewCount: int | None = Field(default=None, ge=0)
     dimensions: ProductDimensions = Field(default_factory=ProductDimensions)
+    # Milestone 5.5 retrieval provenance.
+    matchedQueries: list[str] = Field(default_factory=list, description="Searches that returned this product.")
+    retrievalScore: float | None = Field(default=None, description="Deterministic rerank score (higher is better).")
     # Provider reference for fetching product details later (Milestone 5).
     # Kept server-side: excluded from API responses.
     detailPageToken: str | None = Field(default=None, exclude=True, max_length=4000)
@@ -78,10 +81,23 @@ class ProductSearchRequest(BaseModel):
     maxResults: int = Field(default=5, ge=1, le=10)
 
 
-class ProductSearchResponse(BaseModel):
+QueryStatus = Literal["ok", "empty", "failed"]
+
+
+class QueryOutcome(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     query: str
+    status: QueryStatus
+    resultCount: int = 0
+    error: str | None = None
+
+
+class ProductSearchResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    query: str = Field(description="The most specific query executed (kept for Milestone 4 clients).")
+    queries: list[QueryOutcome] = Field(default_factory=list, description="Every search executed for this request.")
     provider: str
     resultSource: ResultSource
     cachedAt: datetime | None = Field(

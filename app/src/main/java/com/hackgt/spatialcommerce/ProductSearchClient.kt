@@ -1,6 +1,5 @@
 package com.hackgt.spatialcommerce
 
-import org.json.JSONArray
 import org.json.JSONObject
 import java.io.IOException
 import java.net.HttpURLConnection
@@ -56,7 +55,8 @@ class ProductSearchClient(
 
         try {
             val body = JSONObject().apply {
-                put("analysis", analysis.toJson())
+                // Send the backend's own validated analysis back unchanged.
+                put("analysis", JSONObject(analysis.rawJson))
                 put("maxResults", MAX_RESULTS)
             }.toString()
             connection.outputStream.bufferedWriter(Charsets.UTF_8).use { it.write(body) }
@@ -169,6 +169,15 @@ class ProductSearchClient(
             cachedAt = json.optionalString("cachedAt"),
             products = products,
             message = json.optionalString("message"),
+            queries = json.optJSONArray("queries")?.let { array ->
+                buildList {
+                    for (index in 0 until array.length()) {
+                        val item = array.optJSONObject(index) ?: continue
+                        val query = item.optionalString("query") ?: continue
+                        add(QueryOutcome(query, item.optionalString("status") ?: "ok", item.optInt("resultCount", 0)))
+                    }
+                }
+            }.orEmpty(),
         )
     }
 
@@ -199,19 +208,6 @@ class ProductSearchClient(
         )
     }
 
-    private fun VisualProductAnalysis.toJson(): JSONObject = JSONObject().apply {
-        put("objectDetected", objectDetected)
-        put("category", category ?: JSONObject.NULL)
-        put("subcategory", subcategory ?: JSONObject.NULL)
-        put("color", color ?: JSONObject.NULL)
-        put("materials", JSONArray(materials))
-        put("style", JSONArray(style))
-        put("shape", shape ?: JSONObject.NULL)
-        put("searchKeywords", JSONArray(searchKeywords))
-        put("confidence", confidence)
-        put("message", message ?: JSONObject.NULL)
-    }
-
     private fun JSONObject.optionalString(key: String): String? {
         if (!has(key) || isNull(key)) return null
         return optString(key).trim().takeIf { it.isNotEmpty() }
@@ -228,7 +224,7 @@ class ProductSearchClient(
     companion object {
         private const val MAX_RESULTS = 5
         private const val CONNECT_TIMEOUT_MS = 5_000
-        private const val READ_TIMEOUT_MS = 25_000
+        private const val READ_TIMEOUT_MS = 40_000
         private const val DIMENSION_READ_TIMEOUT_MS = 45_000
         private const val MAX_RESPONSE_CHARS = 200_000
     }

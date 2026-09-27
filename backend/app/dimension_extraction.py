@@ -23,7 +23,8 @@ from .dimension_parsing import (
 
 logger = logging.getLogger(__name__)
 
-SOURCE_PRIORITY = ("json_ld", "structured_metadata", "spec_table", "page_text")
+# Page-level sources; provider product-detail specs rank above all of these (see resolver).
+SOURCE_PRIORITY = ("json_ld", "structured_metadata", "spec_table", "page_text_llm", "page_text")
 MAX_HTML_CHARS = 3_000_000
 _PRODUCT_TYPES = {"product", "productgroup", "individualproduct", "productmodel"}
 _AXES = ("width", "depth", "height")

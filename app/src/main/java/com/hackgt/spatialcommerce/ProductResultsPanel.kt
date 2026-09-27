@@ -116,7 +116,16 @@ class ProductResultsPanel(
         } else {
             "${result.products.size} similar products  •  $sourceLabel"
         }
-        val lines = mutableListOf("Search: “${result.query}”  via ${result.provider}")
+        val lines = if (result.queries.size > 1) {
+            val failed = result.queries.count { it.status == "failed" }
+            mutableListOf(
+                "${result.queries.size} searches via ${result.provider}" +
+                    (if (failed > 0) " ($failed failed)" else "") + ", merged and ranked:",
+                result.queries.joinToString("\n") { "• “${it.query}”" },
+            )
+        } else {
+            mutableListOf("Search: “${result.query}”  via ${result.provider}")
+        }
         if (result.isCached) {
             lines += "Live search unavailable — saved from an earlier live search" +
                 result.cachedAt?.let { " (${it.take(16).replace('T', ' ')} UTC)" }.orEmpty() + "."

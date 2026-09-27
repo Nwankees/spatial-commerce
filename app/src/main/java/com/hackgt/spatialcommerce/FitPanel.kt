@@ -132,6 +132,7 @@ class FitPanel(
             "json_ld" -> "JSON-LD"
             "structured_metadata" -> "structured metadata"
             "spec_table" -> "spec table"
+            "page_text_llm" -> "retailer specifications"
             "page_text" -> "page text"
             else -> null
         }
