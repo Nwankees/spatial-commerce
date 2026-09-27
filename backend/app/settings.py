@@ -33,6 +33,9 @@ class Settings(BaseSettings):
     dimension_browser_use_enabled: bool = True
     dimension_crawl_timeout_seconds: float = 75.0
     dimension_browser_timeout_seconds: float = 240.0
+    # Milestone 7 conversational action planner. It is local and uses no API key.
+    ollama_agent_model: str = "qwen3:4b-instruct"
+    ollama_agent_timeout_seconds: float = 45.0
     # Multi-query retrieval.
     product_search_max_queries: int = 3
     product_search_results_per_query: int = 10

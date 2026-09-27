@@ -41,10 +41,13 @@ class MainActivity : Activity() {
     private lateinit var findProductsButton: Button
     private lateinit var resultsPanel: ProductResultsPanel
     private lateinit var rotationControls: LinearLayout
+    private lateinit var conversationPanel: ConversationPanel
+    private lateinit var chatButton: Button
     private val previewProduct = PreviewProducts.lighthouseLoungeChair
     private val backendClient = GeminiBackendClient()
     private val productSearchClient = ProductSearchClient()
     private val arPreviewClient = ArPreviewClient()
+    private val conversationClient = ConversationClient()
     private var currentMode = InteractionMode.MEASURE
 
     // Milestone 6 state. Only touched on the UI thread.
@@ -57,6 +60,9 @@ class MainActivity : Activity() {
     private var lastAnalyzedFrame: CapturedCameraFrame? = null
     private var analysisGeneration = 0
     private var productSearchInFlight = false
+    private var conversationGeneration = 0
+    private var conversationRequestInFlight = false
+    private var conversationContextVersion = 0
     private var lastProductSearch: ProductSearchResult? = null
     /** The candidate the user picked; the handoff point for later milestones. */
     private var selectedProduct: ProductCandidate? = null
@@ -69,6 +75,7 @@ class MainActivity : Activity() {
     private var latestFitResult: FitResult? = null
     private var fitGeneration = 0
     private var fitLookupInFlight = false
+    private var pendingConversationArProductId: String? = null
     @Volatile private var arPreviewStartedElapsedRealtime = 0L
 
     private var session: Session? = null
@@ -132,6 +139,15 @@ class MainActivity : Activity() {
             visibility = View.GONE
             setOnClickListener { beginProductSearch() }
         }
+        chatButton = modeButton("Chat").apply {
+            setPadding(dp(14), 0, dp(14), 0)
+        }
+        conversationPanel = ConversationPanel(
+            context = this,
+            onSend = { message -> sendConversationMessage(message) },
+            onClose = { conversationPanel.close() },
+        )
+        chatButton.setOnClickListener { conversationPanel.open() }
         resultsPanel = ProductResultsPanel(
             context = this,
             onProductSelected = { product -> selectProduct(product) },
@@ -197,8 +213,19 @@ class MainActivity : Activity() {
             },
         )
         root.addView(
+            chatButton,
+            FrameLayout.LayoutParams(FrameLayout.LayoutParams.WRAP_CONTENT, dp(50), Gravity.TOP or Gravity.START).apply {
+                topMargin = dp(64)
+                marginStart = dp(12)
+            },
+        )
+        root.addView(
             bottomPanel,
             FrameLayout.LayoutParams(FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.WRAP_CONTENT, Gravity.BOTTOM),
+        )
+        root.addView(
+            conversationPanel,
+            FrameLayout.LayoutParams(FrameLayout.LayoutParams.MATCH_PARENT, dp(390), Gravity.BOTTOM),
         )
         setContentView(root)
 
@@ -297,6 +324,7 @@ class MainActivity : Activity() {
         backendClient.close()
         productSearchClient.close()
         arPreviewClient.close()
+        conversationClient.close()
         session?.close()
         session = null
         super.onDestroy()
@@ -337,11 +365,15 @@ class MainActivity : Activity() {
     }
 
     private fun beginObjectAnalysis() {
+        conversationContextVersion += 1
         // A new analysis supersedes the previous object; stale search results are ignored.
         analysisGeneration += 1
         lastAnalysis = null
         lastAnalyzedFrame = null
         productSearchInFlight = false
+        lastProductSearch = null
+        selectedProduct = null
+        clearFitCheck()
         findProductsButton.visibility = View.GONE
         resultsPanel.visibility = View.GONE
         analyzeButton.isEnabled = false
@@ -406,6 +438,7 @@ class MainActivity : Activity() {
                 result.fold(
                     onSuccess = { search ->
                         lastProductSearch = search
+                        conversationContextVersion += 1
                         findProductsButton.text = "Find similar products"
                         resultsPanel.showResults(search, selectedProduct?.id)
                         statusText.text = when {
@@ -425,9 +458,117 @@ class MainActivity : Activity() {
         }
     }
 
+    private fun sendConversationMessage(message: String) {
+        conversationGeneration += 1
+        val generation = conversationGeneration
+        val contextVersion = conversationContextVersion
+        conversationRequestInFlight = true
+        val context = ConversationContext(
+            analysis = lastAnalysis,
+            products = lastProductSearch?.products.orEmpty(),
+            selectedProductId = selectedProduct?.id,
+            availableWidthMeters = availableWidthMeters,
+            availableDepthMeters = availableDepthMeters,
+            frame = lastAnalyzedFrame,
+        )
+        conversationClient.send(
+            message = message,
+            context = context,
+            onProgress = { progress ->
+                runOnUiThread {
+                    if (
+                        generation != conversationGeneration ||
+                        contextVersion != conversationContextVersion ||
+                        !conversationRequestInFlight
+                    ) return@runOnUiThread
+                    val label = progress.label()
+                    conversationPanel.showWorking(label)
+                    statusText.text = label
+                }
+            },
+        ) { result ->
+            runOnUiThread {
+                if (generation != conversationGeneration) return@runOnUiThread
+                conversationRequestInFlight = false
+                if (contextVersion != conversationContextVersion) {
+                    conversationPanel.showError(
+                        "The camera, product, or measurement changed while I was working, so I ignored that older result. Please ask again.",
+                    )
+                    return@runOnUiThread
+                }
+                result.fold(
+                    onSuccess = { reply -> applyConversationReply(reply) },
+                    onFailure = { error ->
+                        conversationPanel.showError(error.message ?: "The shopping assistant is unavailable. Please retry.")
+                    },
+                )
+            }
+        }
+    }
+
+    private fun applyConversationReply(reply: ConversationReply) {
+        conversationPanel.showReply(reply.message)
+        var contextChanged = false
+        if (reply.products.isNotEmpty()) {
+            val search = reply.searchResult
+                ?: lastProductSearch?.copy(products = reply.products, message = reply.message)
+                ?: ProductSearchResult(
+                    query = "Conversation results",
+                    provider = "agent",
+                    resultSource = "live",
+                    cachedAt = null,
+                    products = reply.products,
+                    message = reply.message,
+                )
+            lastProductSearch = search
+            contextChanged = true
+            resultsPanel.showResults(search, reply.selectedProductId)
+        }
+        if (
+            reply.action in setOf("find_similar_products", "refine_search") &&
+            reply.selectedProductId == null &&
+            selectedProduct != null
+        ) {
+            clearFitCheck()
+            selectedProduct = null
+            resultsPanel.markSelected(null)
+            contextChanged = true
+        }
+        val selected = reply.selectedProduct
+            ?: lastProductSearch?.products?.firstOrNull { it.id == reply.selectedProductId }
+        if (selected != null && selected.id != selectedProduct?.id) {
+            selectProduct(selected)
+            contextChanged = false // selectProduct already advances the context version.
+        }
+        if (contextChanged) conversationContextVersion += 1
+        when (reply.uiDirective) {
+            "analyze_object" -> {
+                conversationPanel.close()
+                beginObjectAnalysis()
+            }
+            "show_products" -> {
+                conversationPanel.close()
+                resultsPanel.visibility = View.VISIBLE
+                statusText.text = reply.message
+            }
+            "measure_space" -> {
+                conversationPanel.close()
+                enterMeasureSpace()
+            }
+            "show_fit" -> statusText.text = reply.message
+            "enter_ar_preview" -> {
+                conversationPanel.close()
+                beginConversationArPreview(selected ?: selectedProduct)
+            }
+            else -> statusText.text = reply.message
+        }
+    }
+
     private fun selectProduct(product: ProductCandidate) {
+        val changed = selectedProduct?.id != product.id
         if (product.id != fitProduct?.id) clearFitCheck()
         selectedProduct = product
+        if (changed) conversationContextVersion += 1
         resultsPanel.markSelected(product.id)
         val retailer = product.retailer?.let { " at $it" }.orEmpty()
         statusText.text = "Selected: ${product.title} — ${product.displayPrice()}$retailer. " +
@@ -453,8 +594,15 @@ class MainActivity : Activity() {
                     onSuccess = { dimensions ->
                         fitDimensions = dimensions
                         refreshFit()
+                        if (pendingConversationArProductId == product.id) {
+                            pendingConversationArProductId = null
+                            beginRealProductPreview()
+                        }
                     },
                     onFailure = { exception ->
+                        if (pendingConversationArProductId == product.id) {
+                            pendingConversationArProductId = null
+                        }
                         fitPanel.showError(exception.message ?: "Dimension lookup failed. Please retry.")
                         statusText.text = "Fit check did not complete."
                     },
@@ -503,8 +651,13 @@ class MainActivity : Activity() {
     }
 
     private fun onAvailableSpaceMeasured(width: Float?, depth: Float?) {
-        availableWidthMeters = width?.toDouble()
-        availableDepthMeters = depth?.toDouble()
+        val newWidth = width?.toDouble()
+        val newDepth = depth?.toDouble()
+        if (newWidth != availableWidthMeters || newDepth != availableDepthMeters) {
+            conversationContextVersion += 1
+        }
+        availableWidthMeters = newWidth
+        availableDepthMeters = newDepth
         refreshFit()
     }
 
@@ -514,7 +667,24 @@ class MainActivity : Activity() {
         resultsPanel.visibility = View.GONE
     }
 
+    private fun beginConversationArPreview(product: ProductCandidate?) {
+        if (product == null) {
+            statusText.text = "Choose a product before opening it in your space."
+            return
+        }
+        if (selectedProduct?.id != product.id) selectProduct(product)
+        pendingConversationArProductId = product.id
+        if (fitProduct?.id == product.id && fitDimensions != null) {
+            pendingConversationArProductId = null
+            beginRealProductPreview()
+            return
+        }
+        statusText.text = "Confirming verified dimensions before opening the 3D preview…"
+        beginFitCheck()
+    }
+
     private fun resetArScene() {
+        pendingConversationArProductId = null
         arGeneration += 1
         arRequestInFlight = false
         arPreviewClient.cancel()
@@ -630,6 +800,7 @@ class MainActivity : Activity() {
     }
 
     private fun clearFitCheck() {
+        pendingConversationArProductId = null
         arGeneration += 1
         arRequestInFlight = false
         arPreviewClient.cancel()

@@ -167,6 +167,14 @@ Milestone 5 compatibility: merged products keep their SerpApi product ID, detail
 4. Find similar products: confirm the panel lists the searches run and shows real, relevant products.
 5. Select a product and Check fit; confirm Milestone 5 still works.
 
+## Milestone 7: conversational shopping agent
+
+The integrated app adds a **Chat** sheet without replacing any existing AR, analysis, search, selection, or fit buttons. Each turn synchronizes the Android UI's current analysis, analyzed camera frame, ordered product results, selected product, and measured space with a process-local conversation session. Image bytes stay out of Qwen prompts and are used only by the existing visual-search pipeline.
+
+The primary path is intentionally model-driven: message + session/tool state → local `qwen3:4b-instruct` → schema-constrained `AgentAction` → validated backend tool execution → a schema-constrained Qwen response grounded in that tool result. Qwen resolves references such as “the second one,” “cheaper,” and “show it in my room” from the supplied session state; it never mutates app state directly. Deterministic routing and canonical response text are used only as recovery for an unavailable model or malformed model output.
+
+Typed tools support visual + text product search, refinement, selection by stable ID or one-based current-result order, product details, size comparison, two-axis fit checks, and the real M6 SF3D preview service. Conversational fit shares M6's verified-dimension cache, and “show it in my room” joins the selected product's real reconstruction job before Android uses the normal real-scale auto-placement flow. It never substitutes the historical built-in chair.
+
 ## Milestone 5: spatial fit
 
 Selected real product → trustworthy product dimensions → measured available space → deterministic fit result.

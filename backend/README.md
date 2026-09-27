@@ -39,6 +39,20 @@ For a verbose live trace from `backend/`, run:
 
 Add `--html ..\tmp\saved-page.html` to use a captured fixture without refetching. The script prints the selected variant, exact model input, raw result, source path, deterministic validation, normalized values, axis mapping, and fit/M6 eligibility.
 
+## Conversational shopping agent (Milestone 7)
+
+M7 reuses local `qwen3:4b-instruct` (`OLLAMA_AGENT_MODEL`) as a schema-constrained action planner. The normal path is: user message + session state → local Qwen → validated typed action → backend tool execution → a second schema-constrained Qwen call grounded strictly in the typed tool result. The model cannot directly mutate the session or change a tool's status/facts. The small deterministic router and canonical tool-result wording are used only if Ollama is unavailable or returns malformed JSON, so the core demo remains recoverable without pretending a tool succeeded.
+
+Conversation endpoints:
+
+- `POST /api/v1/conversations` creates an in-memory session.
+- `PUT /api/v1/conversations/{id}/context` synchronizes the existing button UI's current analysis, analyzed frame, ordered results, selected product, and measured space. Prepared image bytes remain backend-only and never enter Qwen context.
+- `POST /api/v1/conversations/{id}/messages` plans and executes one typed shopping action.
+- `GET /api/v1/conversations/{id}` reads state/history.
+- `POST /api/v1/conversations/{id}/reset` clears that session.
+
+Implemented tools cover visual + text product search/refinement/selection, details/comparison, two-axis fit checks, and M6's real selected-product reconstruction service. Conversational fit and AR share M6's dimension cache; the AR action starts or joins the real SF3D job and Android continues through the normal real-scale placement flow. It never substitutes the built-in chair.
+
 ## Product search
 
 `POST /api/v1/products/search` accepts the validated `analysis`, the same `imageBase64`/rotation used for analysis, and `maxResults`. Text queries run through SerpApi Google Shopping while the photographed object is uploaded directly to SerpApi's Image API and searched through Google Lens `products`, `visual_matches`, and `exact_matches`; the image never needs a public URL. Results are deduplicated and reranked together, with bounded one-candidate-at-a-time local Qwen3-VL comparisons over the top-three shortlist. Either retrieval path can fail independently. `SERPAPI_API_KEY` stays server-side; `LENS_SEARCH_ENABLED`, `LENS_MODES`, `VISUAL_RERANK_ENABLED`, and `VISUAL_RERANK_MAX_CANDIDATES` tune the feature. Successful live results are cached in `.cache/product_search_cache.json` for dimension/AR handoff and failure fallback.

@@ -43,6 +43,18 @@ from .serpapi_provider import SerpApiProductSearchProvider
 from .settings import Settings, get_settings
 from .visual_reranker import OllamaCandidateVisualReranker
 from .visual_search import SerpApiGoogleLensProvider
+from .conversation_ar import M6ArPreviewGateway, M6CachedDimensionGateway
+from .conversation_models import (
+    ConversationContextRequest,
+    ConversationHistoryResponse,
+    ConversationTurnRequest,
+    ConversationTurnResponse,
+    CreateConversationResponse,
+)
+from .conversation_planner import OllamaConversationPlanner
+from .conversation_service import ConversationService
+from .conversation_store import ConversationNotFoundError, ConversationStore
+from .conversation_tools import ShoppingToolExecutor
 
 logger = logging.getLogger(__name__)
 _app_logger = logging.getLogger("app")
@@ -199,6 +211,11 @@ def get_ar_preview_service(settings: Settings = Depends(get_settings)) -> ArPrev
     return _ar_service
 
 
+@lru_cache
+def get_conversation_store() -> ConversationStore:
+    return ConversationStore()
+
+
 def get_product_search_service(
     settings: Settings = Depends(get_settings),
 ) -> ProductSearchService:
@@ -239,10 +256,40 @@ def get_product_search_service(
     )
 
 
+def get_conversation_service(
+    settings: Settings = Depends(get_settings),
+    search: ProductSearchService = Depends(get_product_search_service),
+    dimensions: PragmaticDimensionResolver = Depends(get_dimension_resolver),
+    resolutions: ResolutionCache = Depends(get_resolution_cache),
+    ar_preview: ArPreviewService = Depends(get_ar_preview_service),
+    cache: ProductSearchCache = Depends(get_product_cache),
+    store: ConversationStore = Depends(get_conversation_store),
+) -> ConversationService:
+    planner = OllamaConversationPlanner(
+        settings.ollama_base_url,
+        settings.ollama_agent_model,
+        timeout_seconds=settings.ollama_agent_timeout_seconds,
+        keep_alive=settings.ollama_keep_alive,
+    )
+    tools = ShoppingToolExecutor(
+        search,
+        M6CachedDimensionGateway(dimensions, resolutions),
+        ar_preview=M6ArPreviewGateway(ar_preview.request),
+        product_lookup=cache.find_product,
+    )
+    return ConversationService(
+        store,
+        planner,
+        tools,
+        response_writer=planner,
+        product_lookup=cache.find_product,
+    )
+
+
 def create_app() -> FastAPI:
     app = FastAPI(
         title="Spatial Commerce Visual Analysis",
-        version="0.6.1",
+        version="0.7.0",
         docs_url="/docs",
         redoc_url=None,
     )
@@ -251,6 +298,9 @@ def create_app() -> FastAPI:
     async def health(settings: Settings = Depends(get_settings)) -> dict[str, object]:
         vision = await ollama_health(settings.ollama_base_url, settings.ollama_model)
         dimension = await ollama_health(settings.ollama_base_url, settings.ollama_dimension_model)
+        agent = dimension if settings.ollama_agent_model == settings.ollama_dimension_model else await ollama_health(
+            settings.ollama_base_url, settings.ollama_agent_model
+        )
         return {
             "status": "ok",
             "vision": {
@@ -264,6 +314,11 @@ def create_app() -> FastAPI:
                 "enabled": settings.dimension_llm_enabled,
                 "installed": dimension.get("modelInstalled", False),
             },
+            "conversationAgent": {
+                "provider": "ollama",
+                "model": settings.ollama_agent_model,
+                "installed": agent.get("modelInstalled", False),
+            },
             "productSearchConfigured": bool(settings.serpapi_api_key),
             "visualSearch": {
                 "provider": "serpapi_google_lens",
@@ -276,6 +331,75 @@ def create_app() -> FastAPI:
             },
             "reconstruction": await SidecarReconstructionProvider(settings.reconstruction_service_url).health(),
         }
+
+    @app.post("/api/v1/conversations", response_model=CreateConversationResponse)
+    async def create_conversation(
+        service: ConversationService = Depends(get_conversation_service),
+    ) -> CreateConversationResponse:
+        return service.create()
+
+    @app.get("/api/v1/conversations/{session_id}", response_model=ConversationHistoryResponse)
+    async def get_conversation(
+        session_id: str,
+        service: ConversationService = Depends(get_conversation_service),
+    ) -> ConversationHistoryResponse:
+        try:
+            return service.history(session_id)
+        except ConversationNotFoundError as exc:
+            raise HTTPException(status_code=404, detail="Conversation session not found.") from exc
+
+    @app.put("/api/v1/conversations/{session_id}/context", response_model=ConversationHistoryResponse)
+    async def sync_conversation_context(
+        session_id: str,
+        request: ConversationContextRequest,
+        settings: Settings = Depends(get_settings),
+        service: ConversationService = Depends(get_conversation_service),
+    ) -> ConversationHistoryResponse:
+        try:
+            image_bytes = None
+            if request.imageBase64 is not None:
+                if request.analysis is None:
+                    raise InvalidImageError("An analyzed object is required with the conversation image.")
+                image_bytes = prepare_search_image(
+                    ProductSearchRequest(
+                        analysis=request.analysis,
+                        imageBase64=request.imageBase64,
+                        mimeType=request.mimeType,
+                        rotationDegrees=request.rotationDegrees,
+                    ),
+                    settings.max_image_bytes,
+                )
+            return service.sync_context(session_id, request, image_bytes=image_bytes)
+        except ConversationNotFoundError as exc:
+            raise HTTPException(status_code=404, detail="Conversation session not found.") from exc
+        except InvalidImageError as exc:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    @app.post(
+        "/api/v1/conversations/{session_id}/messages",
+        response_model=ConversationTurnResponse,
+    )
+    async def conversation_turn(
+        session_id: str,
+        request: ConversationTurnRequest,
+        service: ConversationService = Depends(get_conversation_service),
+    ) -> ConversationTurnResponse:
+        try:
+            return await service.turn(session_id, request.message)
+        except ConversationNotFoundError as exc:
+            raise HTTPException(status_code=404, detail="Conversation session not found.") from exc
+
+    @app.post("/api/v1/conversations/{session_id}/reset", response_model=CreateConversationResponse)
+    async def reset_conversation(
+        session_id: str,
+        service: ConversationService = Depends(get_conversation_service),
+    ) -> CreateConversationResponse:
+        try:
+            return service.reset(session_id)
+        except ConversationNotFoundError as exc:
+            raise HTTPException(status_code=404, detail="Conversation session not found.") from exc
 
     @app.post("/api/v1/analyze", response_model=VisualProductAnalysis)
     async def analyze_product(
